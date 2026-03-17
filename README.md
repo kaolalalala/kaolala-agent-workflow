@@ -8,13 +8,53 @@
 
 ## Screenshots
 
-| 仪表盘 | 工作流编辑器 | 运行中心 |
-|--------|-------------|---------|
-| ![Dashboard](docs/screenshots/dashboard.png) | ![Editor](docs/screenshots/workflow-editor.png) | ![Runs](docs/screenshots/run-center.png) |
+### 仪表盘 & 项目管理
 
-| 运行追踪 | 开发台 | 资产管理 |
-|----------|--------|---------|
-| ![Trace](docs/screenshots/run-trace.png) | ![Dev](docs/screenshots/agent-dev.png) | ![Assets](docs/screenshots/assets.png) |
+![Dashboard](docs/screenshots/dashboard.png)
+
+### 工作流编辑器
+
+![Workflow Editor](docs/screenshots/workflow-editor.png)
+
+<details>
+<summary>节点库 & 节点检查器</summary>
+
+| 节点库 | 检查器 - 概览 | 检查器 - 配置 |
+|--------|--------------|--------------|
+| ![Node Library](docs/screenshots/node-library.png) | ![Inspector Overview](docs/screenshots/inspector-overview.png) | ![Inspector Config](docs/screenshots/inspector-config.png) |
+
+</details>
+
+### 运行中心 & 分析看板
+
+![Run Center](docs/screenshots/run-center.png)
+
+### 执行追踪 & 调试
+
+![Execution Timeline](docs/screenshots/run-trace.png)
+
+<details>
+<summary>Prompt Trace & 节点 I/O</summary>
+
+| Prompt Trace | 节点 I/O |
+|-------------|----------|
+| ![Prompt Trace](docs/screenshots/prompt-trace.png) | ![Node IO](docs/screenshots/node-io.png) |
+
+</details>
+
+### 开发台 (Agent Dev)
+
+| 工作台列表 | IDE 环境 |
+|-----------|---------|
+| ![Agent Dev](docs/screenshots/agent-dev.png) | ![Agent Dev IDE](docs/screenshots/agent-dev-ide.png) |
+
+![运行脚本](docs/screenshots/agent-dev-run.png)
+
+### 资产管理 & 全局功能
+
+| 资产管理 | 创建工作流 | 全局搜索 |
+|---------|-----------|---------|
+| ![Assets](docs/screenshots/assets.png) | ![Create Workflow](docs/screenshots/create-workflow.png) | ![Global Search](docs/screenshots/global-search.png) |
 
 ---
 
