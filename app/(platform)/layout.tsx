@@ -42,6 +42,7 @@ const navItems = [
   { href: "/projects", label: "项目", icon: FolderKanban },
   { href: "/runs", label: "运行中心", icon: ActivitySquare },
   { href: "/evaluations", label: "评测", icon: ClipboardCheck },
+  { href: "/meta-agent", label: "Meta-Agent", icon: Sparkles },
   { href: "/agent-dev", label: "开发台", icon: Terminal },
   { href: "/assets", label: "资产", icon: Boxes },
   { href: "/settings", label: "设置", icon: Settings },
