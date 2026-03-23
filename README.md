@@ -82,6 +82,12 @@
 - 评估页面与 API（`/evaluations`）
 - 支持批量评估与结果对比
 
+**通知系统 (Notification Channels)**
+- 运行完成/失败时自动推送通知
+- 6 种通道适配器：飞书、钉钉、Slack、Discord、通用 Webhook、SMTP 邮件
+- 设置页面可视化管理：添加/删除/启用禁用/测试发送
+- 配置加密存储（AES-256-GCM），投递日志记录
+
 **其他**
 - Layout 全面升级，新增评估入口
 - RightInspector 配置面板优化
@@ -102,6 +108,7 @@
 - **开发台 (Agent Dev)** — 集成 Monaco 编辑器 + 终端的 IDE 环境，直接运行脚本并追踪
 - **资产管理** — 模型、Prompt 模板、工具、技能包、参考文档的统一管理
 - **项目管理** — 项目 CRUD、归档、工作流版本管理、全局搜索
+- **通知推送** — 运行完成/失败自动通知，支持飞书、钉钉、Slack、Discord、Webhook、邮件
 
 > 详细功能说明: [docs/FEATURES.md](docs/FEATURES.md)
 
