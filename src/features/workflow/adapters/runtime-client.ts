@@ -324,6 +324,20 @@ export interface LocalFileInfo {
   updatedAt: string;
 }
 
+export interface NotificationChannelView {
+  id: string;
+  name: string;
+  channelType: string;
+  adapterType: string;
+  enabled: boolean;
+  triggerOnSuccess: boolean;
+  triggerOnFailure: boolean;
+  lastTestAt?: string;
+  lastTestOk?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AgentDocumentView {
   id: string;
   runId?: string;
@@ -2926,5 +2940,51 @@ export const runtimeClient = {
     const response = await fetch(`/api/agent-dev/runs?runId=${encodeURIComponent(runId)}`);
     if (!response.ok) throw new Error(await resolveHttpError(response, "获取开发运行详情失败"));
     return (await response.json()) as { detail: DevRunDetailView | null };
+  },
+
+  // ── Notification channels ──
+
+  async listNotificationChannels() {
+    const response = await fetch("/api/notification-channels");
+    if (!response.ok) throw new Error(await resolveHttpError(response, "获取通知通道列表失败"));
+    return (await response.json()) as { channels: NotificationChannelView[] };
+  },
+
+  async createNotificationChannel(payload: {
+    name: string;
+    channelType: string;
+    adapterType: string;
+    config: Record<string, unknown>;
+    triggerOnSuccess?: boolean;
+    triggerOnFailure?: boolean;
+    enabled?: boolean;
+  }) {
+    const response = await fetch("/api/notification-channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new Error(await resolveHttpError(response, "创建通知通道失败"));
+    return (await response.json()) as NotificationChannelView;
+  },
+
+  async updateNotificationChannel(id: string, payload: Record<string, unknown>) {
+    const response = await fetch(`/api/notification-channels/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new Error(await resolveHttpError(response, "更新通知通道失败"));
+    return (await response.json()) as NotificationChannelView;
+  },
+
+  async deleteNotificationChannel(id: string) {
+    const response = await fetch(`/api/notification-channels/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!response.ok) throw new Error(await resolveHttpError(response, "删除通知通道失败"));
+  },
+
+  async testNotificationChannel(id: string) {
+    const response = await fetch(`/api/notification-channels/${encodeURIComponent(id)}/test`, { method: "POST" });
+    return (await response.json()) as { ok: boolean; error?: string };
   },
 };

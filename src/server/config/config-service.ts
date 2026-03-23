@@ -4178,3 +4178,6 @@ class ConfigService {
 }
 
 export const configService = new ConfigService();
+
+// Re-export encryption utilities for use by notification service
+export { encodeSecret, decodeSecret };

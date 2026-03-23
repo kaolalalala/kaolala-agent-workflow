@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 
 import { eventStreamHub } from "@/server/api/event-stream";
+import { notificationService } from "@/server/notification/notification-service";
 import { LLMChatAdapter } from "@/server/agents/adapters/llm-chat-adapter";
 import { MockAgentAdapter } from "@/server/agents/adapters/mock-agent-adapter";
 import type { AgentAdapter } from "@/server/agents/adapters/agent-adapter";
@@ -2732,6 +2733,19 @@ class RuntimeEngine {
 
     memoryStore.appendEvent(runId, event);
     eventStreamHub.publish(runId, event);
+
+    // Fire-and-forget notification for terminal run events
+    if (type === "run_completed" || type === "run_failed") {
+      const run = memoryStore.getRun(runId);
+      notificationService
+        .notifyRunEvent(runId, type, {
+          runName: run?.name,
+          status: run?.status,
+          finishedAt: event.timestamp,
+          ...(data as Record<string, unknown>),
+        })
+        .catch((err) => console.warn("[Runtime] Notification dispatch failed:", err instanceof Error ? err.message : err));
+    }
   }
 
   private getTaskByNode(runId: string, nodeId: string): Task {

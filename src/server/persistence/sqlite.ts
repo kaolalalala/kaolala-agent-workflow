@@ -863,4 +863,35 @@ safeAlter("CREATE INDEX IF NOT EXISTS idx_ltm_memory_type ON long_term_memory(me
 safeAlter("CREATE INDEX IF NOT EXISTS idx_ltm_decay ON long_term_memory(decay_score DESC)");
 safeAlter("CREATE INDEX IF NOT EXISTS idx_ltm_merged ON long_term_memory(merged_into)");
 
+// ── Notification channels ──
+db.exec(`
+CREATE TABLE IF NOT EXISTS notification_channel (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  channel_type TEXT NOT NULL,
+  adapter_type TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  config_json TEXT NOT NULL,
+  trigger_on_success INTEGER NOT NULL DEFAULT 1,
+  trigger_on_failure INTEGER NOT NULL DEFAULT 1,
+  last_test_at TEXT,
+  last_test_ok INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notification_log (
+  id TEXT PRIMARY KEY,
+  channel_id TEXT NOT NULL,
+  run_id TEXT,
+  event_type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  error TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_notif_channel_enabled ON notification_channel(enabled);
+CREATE INDEX IF NOT EXISTS idx_notif_log_channel ON notification_log(channel_id, created_at DESC);
+`);
+
 export { db };
