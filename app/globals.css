@@ -1,0 +1,79 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  --panel: #ffffff;
+  --panel-strong: #ffffff;
+  --panel-border: rgba(15, 23, 42, 0.08);
+  --accent: #6366f1;
+  --accent-strong: #4f46e5;
+  --shadow-color: rgba(15, 23, 42, 0.08);
+}
+
+.dark {
+  --background: #020617;
+  --foreground: #e2e8f0;
+  --panel: rgba(15, 23, 42, 0.92);
+  --panel-strong: rgba(15, 23, 42, 0.96);
+  --panel-border: rgba(148, 163, 184, 0.2);
+  --accent: #818cf8;
+  --accent-strong: #6366f1;
+  --shadow-color: rgba(2, 6, 23, 0.35);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-space-grotesk);
+  --font-mono: var(--font-jetbrains-mono);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Inter, "PingFang SC", "Noto Sans SC", "Segoe UI", sans-serif;
+  transition: background-color 160ms ease, color 160ms ease;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 28%, white);
+}
+
+.react-flow__node {
+  will-change: transform;
+}
+
+.react-flow__attribution {
+  display: none;
+}
+
+.react-flow__controls,
+.react-flow__minimap {
+  overflow: hidden;
+  border: 1px solid var(--panel-border);
+  border-radius: 18px;
+  background: var(--panel);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 24px 48px -28px var(--shadow-color);
+}
+
+.react-flow__handle {
+  pointer-events: all;
+  cursor: crosshair;
+  transition: box-shadow 120ms ease, opacity 120ms ease, border-color 120ms ease;
+}
+
+.react-flow__handle:hover {
+  box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.react-flow__edge-path {
+  transition: stroke-width 120ms ease, opacity 120ms ease;
+}
