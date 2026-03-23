@@ -3,9 +3,8 @@
  * Used here to recover interrupted agent workflow runs (durable execution).
  */
 export async function register() {
-  // Only run on the server side (not during build or client)
-  if (typeof globalThis.window === "undefined") {
-    // Dynamic import to avoid pulling server modules into client bundles
+  // Only run on the Node.js runtime (skip Edge Runtime and build phase)
+  if (process.env.NEXT_RUNTIME === "nodejs") {
     const { runtimeEngine } = await import("@/server/runtime/runtime-engine");
 
     // Give the server a moment to fully initialize before attempting recovery
