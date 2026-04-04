@@ -1,0 +1,128 @@
+import { describe, expect, it } from "vitest";
+
+import { runTodoDrivenOrchestrator } from "@/server/meta-agent/todo-driven/orchestrator";
+import type {
+  SubagentExecutionResult,
+  TodoExecutor,
+} from "@/server/meta-agent/todo-driven";
+
+describe("parallel paper download recovery regression", () => {
+  it("starts both paper batches in the same wave and recovers a failed batch in serial", async () => {
+    const waveStarts: string[] = [];
+    const attemptCount = new Map<string, number>();
+    let releaseFirstBatch: (() => void) | null = null;
+    const firstBatchGate = new Promise<void>((resolve) => {
+      releaseFirstBatch = resolve;
+    });
+
+    const executor: TodoExecutor = async (context, _state, todo) => ({
+      status: "success",
+      output: context.current_todo.acceptance_criteria.join(" "),
+      summary: `ok:${todo.id}`,
+      criteria_evidence: [...context.current_todo.acceptance_criteria],
+      artifact: {
+        path: `D:\\ai\\agent_workflow_v0_2\\.output\\v0_2\\${todo.id}.md`,
+        type: todo.id === "todo_deliver" ? "final_output" : "todo_result",
+        summary: todo.id === "todo_deliver" ? "final paper delivery completed" : `artifact ${todo.id}`,
+      },
+    });
+
+    const result = await runTodoDrivenOrchestrator(
+      {
+        goal: "帮我下载20篇agent rl的论文，要求：分2个子agent并行下载，各下载10篇",
+        maxPlanningRounds: 2,
+      },
+      {
+        maxSteps: 9,
+        parallel: { enabled: true, max_parallel_todos: 2 },
+        stepExecutor: executor,
+        subagentRunner: async (_agent, brief): Promise<SubagentExecutionResult> => {
+          const nextAttempt = (attemptCount.get(brief.todo_id) ?? 0) + 1;
+          attemptCount.set(brief.todo_id, nextAttempt);
+
+          if (brief.todo_id === "todo_collect_1") {
+            waveStarts.push(`${brief.todo_id}:${nextAttempt}`);
+            await firstBatchGate;
+            return {
+              status: "success",
+              summary: "batch 1 downloaded",
+              artifacts: [],
+              open_questions: [],
+              completion_notes: [],
+              criteria_evidence: [...brief.acceptance_criteria],
+            };
+          }
+
+          if (brief.todo_id === "todo_collect_2" && nextAttempt === 1) {
+            waveStarts.push(`${brief.todo_id}:${nextAttempt}`);
+            releaseFirstBatch?.();
+            return {
+              status: "error",
+              summary: "batch 2 failed once",
+              artifacts: [],
+              open_questions: [],
+              completion_notes: [],
+              criteria_evidence: [],
+              error_message: "transient structured download failure",
+            };
+          }
+
+          if (brief.todo_id === "todo_collect_2" && nextAttempt === 2) {
+            return {
+              status: "error",
+              summary: "batch 2 serial retry needed",
+              artifacts: [],
+              open_questions: [],
+              completion_notes: [],
+              criteria_evidence: [],
+              error_message: "serial retry still needed",
+            };
+          }
+
+          if (brief.todo_id === "todo_collect_2") {
+            return {
+              status: "success",
+              summary: "batch 2 recovered",
+              artifacts: [],
+              open_questions: [],
+              completion_notes: [],
+              criteria_evidence: [...brief.acceptance_criteria],
+            };
+          }
+
+          return {
+            status: "success",
+            summary: `delegated:${brief.todo_id}`,
+            artifacts: [],
+            open_questions: [],
+            completion_notes: [],
+            criteria_evidence: [...brief.acceptance_criteria],
+          };
+        },
+      },
+    );
+
+    expect(waveStarts.slice(0, 2).sort()).toEqual(["todo_collect_1:1", "todo_collect_2:1"]);
+    expect(result.result.status).toBe("success");
+    expect(result.state.status).toBe("completed");
+
+    const recoveredBatch = result.state.todos.find((todo) => todo.id === "todo_collect_2");
+    expect(recoveredBatch?.status).toBe("done");
+    expect(recoveredBatch?.serial_only).toBe(true);
+    expect(recoveredBatch?.downgraded_from_wave).toBe(true);
+    expect(recoveredBatch?.retry_count).toBe(1);
+
+    expect(
+      result.state.execution_log.some((entry) =>
+        entry.todo_id === "todo_collect_2" && entry.action === "downgrade_to_serial"),
+    ).toBe(true);
+    expect(
+      result.state.execution_log.some((entry) =>
+        entry.todo_id === "todo_collect_2" && entry.action === "retry_started"),
+    ).toBe(true);
+    expect(
+      result.state.execution_log.some((entry) =>
+        entry.todo_id === "todo_collect_2" && entry.action === "reroute_started"),
+    ).toBe(false);
+  });
+});
