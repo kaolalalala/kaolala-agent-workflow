@@ -14,18 +14,35 @@ function toSkillGuideExcerpt(value?: string) {
 
 function pickInputArtifacts(state: RunState, todo: TodoItem) {
   // Primary: resolve via depends_on — this reflects the actual runtime data flow.
-  // Each dependency todo may produce multiple artifacts over retries; keep only the
-  // latest one per dependency todo (last entry in insertion order = most recent).
+  // A dependency todo may produce multiple artifacts across retries. We keep the
+  // last two unique-path artifacts per dependency so the subagent can see both
+  // the primary result and any supplementary output produced during retries,
+  // rather than blindly trusting insertion order alone.
   const depSet = new Set(todo.depends_on);
   if (depSet.size > 0) {
-    const latestByDep = new Map<string, (typeof state.artifacts)[0]>();
+    // Collect all artifacts per dependency in insertion order.
+    const byDep = new Map<string, (typeof state.artifacts)>();
     for (const artifact of state.artifacts) {
       if (depSet.has(artifact.related_todo)) {
-        latestByDep.set(artifact.related_todo, artifact);
+        const list = byDep.get(artifact.related_todo) ?? [];
+        list.push(artifact);
+        byDep.set(artifact.related_todo, list);
       }
     }
-    if (latestByDep.size > 0) {
-      return [...latestByDep.values()];
+    if (byDep.size > 0) {
+      const results: (typeof state.artifacts) = [];
+      for (const list of byDep.values()) {
+        // De-duplicate by path, keeping insertion order (last one per path wins).
+        const byPath = new Map<string, (typeof state.artifacts)[0]>();
+        for (const artifact of list) {
+          byPath.set(artifact.path, artifact);
+        }
+        // Return the last 2 unique-path artifacts so the subagent has enough
+        // context to identify the most complete/recent result.
+        const deduped = [...byPath.values()];
+        results.push(...deduped.slice(-2));
+      }
+      return results;
     }
   }
 
@@ -222,9 +239,13 @@ export function buildTodoExecutionContext(
         id: item.id,
         name: item.name,
         description: item.description,
-        // On retries skip guide_content — the agent already had it on the first attempt.
-        // Only the description and output_description are needed to re-select the right skill.
-        guide_content: isRetry ? undefined : toSkillGuideExcerpt(item.guideContent),
+        // On retries keep a short guide excerpt so the subagent still knows which skill is
+        // mandatory and when to call it. Full guide is truncated to save tokens; the
+        // retry_analysis directive carries the specific improvement instructions.
+        guide_content: item.guideContent
+          ? (isRetry ? item.guideContent.slice(0, 400) : toSkillGuideExcerpt(item.guideContent))
+          : undefined,
+        runtime_profile_id: item.runtimeProfileId,
         output_description: item.outputDescription,
       })),
     },

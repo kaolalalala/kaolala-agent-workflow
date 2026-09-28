@@ -21,14 +21,14 @@ function resolveProvider(nodeConfig: AgentNodeConfig, workspace: WorkspaceConfig
   if (!nodeConfig.useWorkspaceModelDefault && nodeConfig.provider) {
     return nodeConfig.provider;
   }
-  return workspace.defaultProvider ?? "mock";
+  return workspace.defaultProvider ?? "";
 }
 
 function resolveModel(nodeConfig: AgentNodeConfig, workspace: WorkspaceConfig) {
   if (!nodeConfig.useWorkspaceModelDefault && nodeConfig.model) {
     return nodeConfig.model;
   }
-  return workspace.defaultModel ?? "mock-agent-v1";
+  return workspace.defaultModel ?? "";
 }
 
 function resolveCredentialId(nodeConfig: AgentNodeConfig, workspace: WorkspaceConfig) {

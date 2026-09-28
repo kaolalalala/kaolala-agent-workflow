@@ -168,4 +168,100 @@ describe("todo planner parallel planning", () => {
     expect(todos.filter((todo) => todo.capability_type === "collection")).toHaveLength(2);
     expect(todos[0]?.title).toBe("明确范围");
   });
+  it("retries when explicit per-worker counts are inflated to the full total", async () => {
+    let callCount = 0;
+
+    const todos = await planInitialTodos(
+      "Use 2 parallel subagents to download 10 papers, each subagent downloads 5 papers, then merge and deliver.",
+      undefined,
+      {
+        invokeLlm: async () => {
+          callCount += 1;
+          if (callCount === 1) {
+            return JSON.stringify({
+              todos: [
+                {
+                  id: "todo_collect_1",
+                  title: "Download first 10 papers",
+                  description: "Download the first 10 requested papers for batch 1.",
+                  priority: "high",
+                  capability_type: "collection",
+                  assignee: "single_executor",
+                  depends_on: [],
+                  acceptance_criteria: ["10 papers downloaded", "batch 1 manifest created"],
+                  input_refs: [],
+                },
+                {
+                  id: "todo_collect_2",
+                  title: "Download second 10 papers",
+                  description: "Download the second 10 requested papers for batch 2.",
+                  priority: "high",
+                  capability_type: "collection",
+                  assignee: "single_executor",
+                  depends_on: [],
+                  acceptance_criteria: ["10 papers downloaded", "batch 2 manifest created"],
+                  input_refs: [],
+                },
+                {
+                  id: "todo_merge",
+                  title: "Merge and deliver",
+                  description: "Merge both batches and deliver the final package.",
+                  priority: "high",
+                  capability_type: "merge",
+                  assignee: "single_executor",
+                  depends_on: ["todo_collect_1", "todo_collect_2"],
+                  acceptance_criteria: ["merged package ready", "delivery report complete"],
+                  input_refs: [],
+                },
+              ],
+            });
+          }
+
+          return JSON.stringify({
+            todos: [
+              {
+                id: "todo_collect_1",
+                title: "Download first 5 papers",
+                description: "Download exactly 5 requested papers for batch 1.",
+                priority: "high",
+                capability_type: "collection",
+                assignee: "single_executor",
+                depends_on: [],
+                acceptance_criteria: ["5 papers downloaded", "batch 1 manifest created"],
+                input_refs: [],
+              },
+              {
+                id: "todo_collect_2",
+                title: "Download second 5 papers",
+                description: "Download exactly 5 requested papers for batch 2.",
+                priority: "high",
+                capability_type: "collection",
+                assignee: "single_executor",
+                depends_on: [],
+                acceptance_criteria: ["5 papers downloaded", "batch 2 manifest created"],
+                input_refs: [],
+              },
+              {
+                id: "todo_merge",
+                title: "Merge and deliver 10 papers",
+                description: "Merge both 5-paper batches and deliver the final 10-paper package.",
+                priority: "high",
+                capability_type: "merge",
+                assignee: "single_executor",
+                depends_on: ["todo_collect_1", "todo_collect_2"],
+                acceptance_criteria: ["10-paper merged package ready", "delivery report complete"],
+                input_refs: [],
+              },
+            ],
+          });
+        },
+      },
+    );
+
+    expect(callCount).toBe(2);
+    expect(todos).toHaveLength(3);
+    expect(todos.filter((todo) => todo.capability_type === "collection")).toHaveLength(2);
+    expect(todos[0]?.title).toContain("5");
+    expect(todos[1]?.title).toContain("5");
+  });
 });

@@ -42,6 +42,7 @@ import {
   saveMetaAgentSession,
   type PersistedMetaAgentSession,
 } from "./session-store";
+import { getPendingInputInfo, isAwaitingInput, waitForInput } from "./interrupt-gate";
 import type { TodoPlanningContext } from "./todo-driven/types";
 import type {
   MetaAgentGoal,
@@ -74,6 +75,7 @@ interface ActiveSession {
   controlPlaneSummary?: ControlPlaneSummary;
   checkpoints?: SessionCheckpoint[];
   replayCandidates?: ReplayCandidate[];
+  pendingInput?: PendingInputState;
 }
 
 const activeSessions = new Map<string, ActiveSession>();
@@ -234,6 +236,14 @@ interface ReplayCandidate {
   incompleteTodoIds: string[];
 }
 
+interface PendingInputState {
+  awaiting: boolean;
+  prompt: string;
+  requestedAt: string;
+  timeoutAt: string;
+  inputToken?: string;
+}
+
 interface ControlPlaneSummary {
   currentState: string;
   owner: string;
@@ -254,7 +264,7 @@ interface ControlPlaneSummary {
     reviewFailRetryBudget: number;
   };
   approvalMode: {
-    mode: "none";
+    mode: "none" | "plan_review_pending";
     summary: string;
   };
   checkpointCount: number;
@@ -310,6 +320,8 @@ function buildProjectPlanningContext(
         name: item.name,
         description: item.description,
         guide_content: item.guideContent,
+        planning_hint: item.planningHint,
+        runtime_profile_id: item.runtimeProfileId,
         output_description: item.outputDescription,
       })),
     },
@@ -449,7 +461,33 @@ function buildMemoryWritebackSummary(
   };
 }
 
-function resolveSessionOwner(session: Pick<ActiveSession, "status" | "supervisorRunState">) {
+function syncPendingInputState(sessionId: string, session: ActiveSession) {
+  const pendingInput = getPendingInputInfo(sessionId);
+  session.pendingInput = pendingInput
+    ? {
+        awaiting: true,
+        prompt: pendingInput.prompt,
+        requestedAt: pendingInput.requestedAt,
+        timeoutAt: pendingInput.timeoutAt,
+        inputToken: pendingInput.token,
+      }
+    : undefined;
+
+  if (pendingInput && session.status === "running") {
+    session.currentPhase = "awaiting_input";
+  }
+
+  return session.pendingInput;
+}
+
+function resolveSessionOwner(sessionId: string, session: Pick<ActiveSession, "status" | "supervisorRunState" | "pendingInput">) {
+  if (isAwaitingInput(sessionId)) {
+    return {
+      owner: "human_reviewer",
+      reason: "runtime is paused until the operator confirms the initial todo plan",
+    };
+  }
+
   const state = session.supervisorRunState;
   if (!state) {
     return {
@@ -492,7 +530,7 @@ function resolveSessionOwner(session: Pick<ActiveSession, "status" | "supervisor
   };
 }
 
-function buildAllowedActions(session: ActiveSession, state?: RunState) {
+function buildAllowedActions(sessionId: string, session: ActiveSession, state?: RunState) {
   if (!state) {
     return ["boot", "inspect_session"];
   }
@@ -509,6 +547,13 @@ function buildAllowedActions(session: ActiveSession, state?: RunState) {
 
   actions.add("inspect_trace");
   actions.add("inspect_issues");
+
+  if (isAwaitingInput(sessionId)) {
+    actions.add("submit_human_input");
+    actions.add("confirm_initial_plan");
+    actions.add("terminate_run");
+    return [...actions];
+  }
 
   if (state.current_wave_id) {
     actions.add("observe_wave");
@@ -555,7 +600,8 @@ function buildCheckpointFromState(
   step: number,
   phase: string,
 ): SessionCheckpoint {
-  const owner = resolveSessionOwner(session);
+  const sessionId = typeof state.metadata?.session_id === "string" ? state.metadata.session_id : "";
+  const owner = resolveSessionOwner(sessionId, session);
 
   return {
     checkpointId: `cp_${state.run_id}_${step}`,
@@ -634,9 +680,10 @@ function buildReplayCandidates(checkpoints: SessionCheckpoint[] = []): ReplayCan
   }));
 }
 
-function buildControlPlaneSummary(session: ActiveSession): ControlPlaneSummary {
+function buildControlPlaneSummary(sessionId: string, session: ActiveSession): ControlPlaneSummary {
   const state = session.supervisorRunState;
-  const owner = resolveSessionOwner(session);
+  const owner = resolveSessionOwner(sessionId, session);
+  const pendingInput = session.pendingInput;
   const usedSteps = Math.max(
     0,
     session.currentStep
@@ -646,10 +693,10 @@ function buildControlPlaneSummary(session: ActiveSession): ControlPlaneSummary {
   );
 
   return {
-    currentState: state?.status ?? session.status,
+    currentState: pendingInput?.awaiting ? "awaiting_input" : (state?.status ?? session.status),
     owner: owner.owner,
     ownerReason: owner.reason,
-    allowedActions: buildAllowedActions(session, state),
+    allowedActions: buildAllowedActions(sessionId, session, state),
     budget: {
       maxSteps: session.runConfig.maxStepLimit,
       usedSteps,
@@ -665,8 +712,10 @@ function buildControlPlaneSummary(session: ActiveSession): ControlPlaneSummary {
       reviewFailRetryBudget: 0,
     },
     approvalMode: {
-      mode: "none",
-      summary: "No human approval gate is wired into the current meta-agent runtime yet.",
+      mode: pendingInput?.awaiting ? "plan_review_pending" : "none",
+      summary: pendingInput?.awaiting
+        ? "Initial todo plan is waiting for operator confirmation before execution continues."
+        : "No human approval is currently pending for this session.",
     },
     checkpointCount: session.checkpoints?.length ?? 0,
     replayCandidateCount: session.replayCandidates?.length ?? 0,
@@ -675,14 +724,15 @@ function buildControlPlaneSummary(session: ActiveSession): ControlPlaneSummary {
   };
 }
 
-function refreshSessionRuntimeDerived(session: ActiveSession) {
+function refreshSessionRuntimeDerived(sessionId: string, session: ActiveSession) {
+  syncPendingInputState(sessionId, session);
   session.replayCandidates = buildReplayCandidates(session.checkpoints);
-  session.controlPlaneSummary = buildControlPlaneSummary(session);
+  session.controlPlaneSummary = buildControlPlaneSummary(sessionId, session);
   return session;
 }
 
 function toPersistedSession(sessionId: string, session: ActiveSession): PersistedMetaAgentSession {
-  const hydrated = hydrateSession(session);
+  const hydrated = hydrateSession(sessionId, session);
   return {
     sessionId,
     status: hydrated.status,
@@ -702,6 +752,7 @@ function toPersistedSession(sessionId: string, session: ActiveSession): Persiste
     checkpoints: hydrated.checkpoints,
     replayCandidates: hydrated.replayCandidates,
     memoryWritebackSummary: hydrated.memoryWritebackSummary,
+    pendingInput: hydrated.pendingInput,
     result: hydrated.result,
     lastUpdatedAt:
       typeof hydrated.supervisorRunState?.metadata?.updated_at === "string"
@@ -716,7 +767,7 @@ function persistSessionSnapshot(sessionId: string) {
   return saveMetaAgentSession(toPersistedSession(sessionId, session));
 }
 
-function hydrateSession(session: ActiveSession) {
+function hydrateSession(sessionId: string, session: ActiveSession) {
   if (!session.planningContextSummary) {
     const projectState = loadProjectState(session.projectId, session.goal);
     const memoryState = loadMemoryState(session.projectId);
@@ -736,7 +787,11 @@ function hydrateSession(session: ActiveSession) {
       memoryState,
     );
   }
-  return refreshSessionRuntimeDerived(session);
+  const hydrated = refreshSessionRuntimeDerived(sessionId, session);
+  if (!hydrated.pendingInput?.awaiting && hydrated.currentPhase === "awaiting_input") {
+    hydrated.currentPhase = hydrated.steps.length > 0 ? "step_running" : "bootstrapping";
+  }
+  return hydrated;
 }
 
 function buildFinalSummaryPrompt(result: MetaAgentResult, state: RunState) {
@@ -929,10 +984,10 @@ async function generateFinalSummaryV2(result: MetaAgentResult, state: RunState) 
 export function getSession(sessionId: string) {
   const session = activeSessions.get(sessionId);
   if (session) {
-    return hydrateSession(session);
+    return hydrateSession(sessionId, session);
   }
   const persisted = loadMetaAgentSession(sessionId);
-  return persisted ? hydrateSession(persisted as ActiveSession) : undefined;
+  return persisted ? hydrateSession(sessionId, persisted as ActiveSession) : undefined;
 }
 
 export function listSessions() {
@@ -955,7 +1010,7 @@ export function listSessions() {
   }>();
 
   for (const persisted of listMetaAgentSessions()) {
-    const session = hydrateSession(persisted as ActiveSession);
+    const session = hydrateSession(persisted.sessionId, persisted as ActiveSession);
     const state = session.supervisorRunState;
     merged.set(persisted.sessionId, {
       sessionId: persisted.sessionId,
@@ -997,7 +1052,7 @@ export function listSessions() {
     lastUpdatedAt?: string;
   }> = [];
   for (const [id, session] of activeSessions) {
-    const hydrated = hydrateSession(session);
+    const hydrated = hydrateSession(id, session);
     const state = hydrated.supervisorRunState;
     merged.set(id, {
       sessionId: id,
@@ -1041,6 +1096,12 @@ export function deleteSession(sessionId: string) {
     return { deleted: false };
   }
   removeMetaAgentSession(sessionId);
+  // Release any pending Human-in-the-Loop gate so the orchestrator
+  // doesn't hang indefinitely after the session is cleaned up.
+  Promise.all([
+    import("./interrupt-gate").then(({ abortGate }) => abortGate(sessionId)),
+    import("./session-event-bus").then(({ destroySessionBus }) => destroySessionBus(sessionId)),
+  ]).catch(() => { /* non-critical cleanup */ });
   return { deleted: true };
 }
 
@@ -1063,6 +1124,9 @@ async function runMetaAgentTodoDrivenPrimary(
   const startedAt = existing?.startedAt ?? nowIso();
   const supervisorRunState = existing?.supervisorRunState ?? createRunState(input.goal, { projectId });
   supervisorRunState.metadata.project_id = projectId;
+  // Bind sessionId into RunState so addExecutionLog can emit SSE events without
+  // needing it passed through every call site.
+  supervisorRunState.metadata.session_id = sessionId;
 
   activeSessions.set(sessionId, {
     result: null,
@@ -1113,6 +1177,15 @@ async function runMetaAgentTodoDrivenPrimary(
         max_reroute_per_todo: 2,
         max_recovery_history_per_todo: 8,
       },
+      // Human-in-the-Loop: pause after planner generates initial todos,
+      // emit awaiting_input SSE event so the user can confirm or modify the plan.
+      onPlanReady: (todos) => {
+        const todoList = todos
+          .map((t, i) => `  ${i + 1}. [${t.id}] ${t.title}`)
+          .join("\n");
+        const prompt = `Planner generated ${todos.length} todos:\n${todoList}\n\nReply to confirm (press Enter / leave blank), or type a note to log. Execution resumes in 5 minutes if no response.`;
+        return waitForInput(sessionId, prompt, "", 5 * 60 * 1000);
+      },
       onProgress: (event) => {
         const session = activeSessions.get(sessionId);
         if (!session) return;
@@ -1121,6 +1194,26 @@ async function runMetaAgentTodoDrivenPrimary(
         session.currentStep = Math.max(1, event.step);
         session.currentIteration = Math.max(1, event.step);
         session.supervisorRunState = event.state;
+
+        // Emit real-time step_progress event to SSE subscribers.
+        import("./session-event-bus").then(({ emitSessionEvent }) => {
+          const state = event.state;
+          emitSessionEvent(sessionId, {
+            type: "step_progress",
+            step: event.step,
+            phase: event.phase,
+            reflectionScore: event.stepRecord?.reflectionScore,
+            reflectionVerdict: event.stepRecord?.reflectionVerdict,
+            todoSummary: (state.todos ?? []).map((t) => ({
+              id: t.id,
+              title: t.title,
+              status: t.status,
+              retry_count: t.retry_count ?? 0,
+            })),
+            totalTokens: Number(state.metadata?.llm_total_tokens ?? 0),
+            llmCallCount: Number(state.metadata?.llm_call_count ?? 0),
+          });
+        }).catch(() => { /* non-critical */ });
 
         const stepRecord = event.stepRecord ?? event.iteration;
         if (stepRecord) {
@@ -1137,7 +1230,7 @@ async function runMetaAgentTodoDrivenPrimary(
           ].sort((a, b) => a.step - b.step).slice(-18);
         }
 
-        refreshSessionRuntimeDerived(session);
+        refreshSessionRuntimeDerived(sessionId, session);
         persistSessionSnapshot(sessionId);
       },
     });
@@ -1163,8 +1256,12 @@ async function runMetaAgentTodoDrivenPrimary(
         updatedProjectState,
         updatedMemoryState,
       );
-      refreshSessionRuntimeDerived(session);
+      refreshSessionRuntimeDerived(sessionId, session);
       persistSessionSnapshot(sessionId);
+      // Notify SSE subscribers that the session has completed.
+      import("./session-event-bus").then(({ emitSessionEvent }) => {
+        emitSessionEvent(sessionId, { type: "session_state", status: "done" });
+      }).catch(() => { /* non-critical */ });
     }
 
     return orchestrated.result;
@@ -1217,9 +1314,13 @@ async function runMetaAgentTodoDrivenPrimary(
           updatedProjectState,
           updatedMemoryState,
         );
-        refreshSessionRuntimeDerived(session);
+        refreshSessionRuntimeDerived(sessionId, session);
         persistSessionSnapshot(sessionId);
       }
+      // Notify SSE subscribers that the session has failed.
+      import("./session-event-bus").then(({ emitSessionEvent }) => {
+        emitSessionEvent(sessionId, { type: "session_state", status: "failed" });
+      }).catch(() => { /* non-critical */ });
     }
 
     return failedResult;

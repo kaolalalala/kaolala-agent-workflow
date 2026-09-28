@@ -24,6 +24,11 @@ import {
   getBuiltinWorkflowTemplateMeta,
   type WorkflowTemplatePresetTask,
 } from "@/server/config/builtin-workflow-templates";
+import { WorkspaceConfigService } from "@/server/config/workspace-config-service";
+import { ProjectCatalogService } from "@/server/config/project-catalog-service";
+import { WorkflowDefinitionService } from "@/server/config/workflow-definition-service";
+import { ArtifactIndexService } from "@/server/config/artifact-index-service";
+import { AssetCatalogService } from "@/server/config/asset-catalog-service";
 
 interface WorkspaceConfigRow {
   id: string;
@@ -340,6 +345,9 @@ interface SkillAssetRow {
   id: string;
   name: string;
   description: string | null;
+  guide_content: string | null;
+  planning_hint: string | null;
+  runtime_profile_id: string | null;
   script_id: string;
   parameter_mapping: string;
   output_description: string | null;
@@ -463,6 +471,11 @@ export interface SkillAsset {
   id: string;
   name: string;
   description?: string;
+  guideContent?: string;
+  /** Planner-facing hint: partitioning strategy, parallelism constraints, per-call capacity. */
+  planningHint?: string;
+  /** Optional runtime driver/profile activated by this skill. */
+  runtimeProfileId?: string;
   scriptId: string;
   parameterMapping: Record<string, string>;
   outputDescription?: string;
@@ -911,6 +924,9 @@ function toSkillAsset(row: SkillAssetRow): SkillAsset {
     id: row.id,
     name: row.name,
     description: row.description ?? undefined,
+    guideContent: row.guide_content ?? undefined,
+    planningHint: row.planning_hint ?? undefined,
+    runtimeProfileId: row.runtime_profile_id ?? undefined,
     scriptId: row.script_id,
     parameterMapping: JSON.parse(row.parameter_mapping) as Record<string, string>,
     outputDescription: row.output_description ?? undefined,
@@ -1255,6 +1271,46 @@ function decodeSecret(value: string): string {
 }
 
 class ConfigService {
+  private readonly workspaceConfigService = new WorkspaceConfigService({
+    toWorkspaceConfig,
+    toNodeConfig,
+    toCredential,
+    encodeSecret,
+    decodeSecret,
+    normalizeToolPolicy,
+    getDefaultToolPolicyByRole,
+  });
+
+  private readonly projectCatalogService = new ProjectCatalogService({
+    toProjectSummary: (row) => this.toProjectSummary(row),
+    normalizeProjectSettings: (value) => this.normalizeProjectSettings(value),
+    buildRunSummary,
+  });
+
+  private readonly workflowDefinitionService = new WorkflowDefinitionService({
+    getProject: (projectId) => this.getProject(projectId),
+    toWorkflowVersionSummary,
+    toWorkflowVersionDefinition,
+  });
+
+  private readonly artifactIndexService = new ArtifactIndexService({
+    getProject: (projectId) => this.getProject(projectId),
+    mapProjectFileSummary,
+    mapProjectFileDetail,
+  });
+
+  private readonly assetCatalogService = new AssetCatalogService({
+    getCredentialById: (credentialId) => this.getCredentialById(credentialId),
+    ensureBuiltinWorkflowTemplates: () => this.ensureBuiltinWorkflowTemplates(),
+    normalizePromptTemplateType,
+    toModelAsset,
+    toPromptTemplateAsset,
+    toWorkflowTemplateAsset,
+    toAgentTemplateAsset,
+    toScriptAsset,
+    toSkillAsset,
+  });
+
   constructor() {
     // Old local DBs can miss columns (e.g. workflow_definition.is_example).
     // We keep bootstrap resilient so API routes don't fail hard on startup.
@@ -1327,105 +1383,27 @@ class ConfigService {
   }
 
   ensureWorkspaceConfig(): WorkspaceConfig {
-    const row = db.prepare("SELECT * FROM workspace_config LIMIT 1").get() as WorkspaceConfigRow | undefined;
-    if (row) {
-      return toWorkspaceConfig(row);
-    }
-
-    const now = nowIso();
-    const id = "workspace_default";
-    db.prepare(
-      `INSERT INTO workspace_config (
-        id, name, default_provider, default_model, default_base_url, default_credential_id, default_temperature, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(id, "默认工作区", null, null, null, null, 0.2, now, now);
-
-    const created = db.prepare("SELECT * FROM workspace_config WHERE id = ?").get(id) as WorkspaceConfigRow;
-    return toWorkspaceConfig(created);
+    return this.workspaceConfigService.ensureWorkspaceConfig();
   }
 
   updateWorkspaceConfig(payload: Partial<WorkspaceConfig>) {
-    const current = this.ensureWorkspaceConfig();
-    const next: WorkspaceConfig = {
-      ...current,
-      name: payload.name ?? current.name,
-      defaultProvider: payload.defaultProvider ?? current.defaultProvider,
-      defaultModel: payload.defaultModel ?? current.defaultModel,
-      defaultBaseUrl: payload.defaultBaseUrl ?? current.defaultBaseUrl,
-      defaultCredentialId: payload.defaultCredentialId ?? current.defaultCredentialId,
-      defaultTemperature: payload.defaultTemperature ?? current.defaultTemperature,
-      updatedAt: nowIso(),
-    };
-
-    db.prepare(
-      `UPDATE workspace_config SET
-        name = ?,
-        default_provider = ?,
-        default_model = ?,
-        default_base_url = ?,
-        default_credential_id = ?,
-        default_temperature = ?,
-        updated_at = ?
-      WHERE id = ?`,
-    ).run(
-      next.name,
-      next.defaultProvider ?? null,
-      next.defaultModel ?? null,
-      next.defaultBaseUrl ?? null,
-      next.defaultCredentialId ?? null,
-      next.defaultTemperature ?? null,
-      next.updatedAt,
-      next.id,
-    );
-
-    return next;
+    return this.workspaceConfigService.updateWorkspaceConfig(payload);
   }
 
   listCredentials() {
-    const rows = db.prepare("SELECT * FROM secret_credential ORDER BY created_at DESC").all() as CredentialRow[];
-    return rows.map(toCredential);
+    return this.workspaceConfigService.listCredentials();
   }
 
   createCredential(payload: { provider: string; label: string; apiKey: string }) {
-    const now = nowIso();
-    const credential: SecretCredential = {
-      id: makeId("cred"),
-      provider: payload.provider,
-      label: payload.label,
-      encryptedValue: encodeSecret(payload.apiKey),
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    db.prepare(
-      `INSERT INTO secret_credential (id, provider, label, encrypted_value, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(
-      credential.id,
-      credential.provider,
-      credential.label,
-      credential.encryptedValue,
-      credential.createdAt,
-      credential.updatedAt,
-    );
-
-    return credential;
+    return this.workspaceConfigService.createCredential(payload);
   }
 
   getCredentialById(credentialId?: string) {
-    if (!credentialId) {
-      return null;
-    }
-    const row = db.prepare("SELECT * FROM secret_credential WHERE id = ?").get(credentialId) as CredentialRow | undefined;
-    return row ? toCredential(row) : null;
+    return this.workspaceConfigService.getCredentialById(credentialId);
   }
 
   resolveCredentialApiKey(credentialId?: string) {
-    const credential = this.getCredentialById(credentialId);
-    if (!credential) {
-      return undefined;
-    }
-    return decodeSecret(credential.encryptedValue);
+    return this.workspaceConfigService.resolveCredentialApiKey(credentialId);
   }
 
   ensureNodeConfig(payload: {
@@ -1437,124 +1415,15 @@ class ConfigService {
     systemPrompt?: string;
     allowHumanInput: boolean;
   }) {
-    const existing = this.getNodeConfig(payload.runId, payload.nodeId);
-    if (existing) {
-      return existing;
-    }
-
-    const defaultToolPolicy = getDefaultToolPolicyByRole(payload.nodeRole ?? "");
-    const now = nowIso();
-    const id = makeId("node_cfg");
-    db.prepare(
-      `INSERT INTO node_config (
-        id, run_id, node_id, name, description, responsibility, system_prompt, additional_prompt,
-        use_workspace_model_default, provider, model, credential_id, base_url, output_path, temperature, allow_human_input, tool_policy,
-        execution_mode, workspace_id, entry_file, run_command,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      id,
-      payload.runId,
-      payload.nodeId,
-      payload.name,
-      null,
-      payload.responsibility ?? null,
-      payload.systemPrompt ?? null,
-      null,
-      1,
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      payload.allowHumanInput ? 1 : 0,
-      defaultToolPolicy,
-      "standard",
-      null,
-      null,
-      null,
-      now,
-      now,
-    );
-
-    const created = this.getNodeConfig(payload.runId, payload.nodeId);
-    if (!created) {
-      throw new Error("节点配置创建失败");
-    }
-    return created;
+    return this.workspaceConfigService.ensureNodeConfig(payload);
   }
 
   getNodeConfig(runId: string, nodeId: string) {
-    const row = db.prepare("SELECT * FROM node_config WHERE run_id = ? AND node_id = ?").get(runId, nodeId) as
-      | NodeConfigRow
-      | undefined;
-    return row ? toNodeConfig(row) : null;
+    return this.workspaceConfigService.getNodeConfig(runId, nodeId);
   }
 
   updateNodeConfig(runId: string, nodeId: string, payload: Partial<AgentNodeConfig>) {
-    const current = this.getNodeConfig(runId, nodeId);
-    if (!current) {
-      throw new Error("节点配置不存在");
-    }
-
-    const nextToolPolicy = normalizeToolPolicy(payload.toolPolicy, current.toolPolicy);
-    const next: AgentNodeConfig = {
-      ...current,
-      ...payload,
-      toolPolicy: nextToolPolicy,
-      runId,
-      nodeId,
-      updatedAt: nowIso(),
-    };
-
-    db.prepare(
-      `UPDATE node_config SET
-        name = ?,
-        description = ?,
-        responsibility = ?,
-        system_prompt = ?,
-        additional_prompt = ?,
-        use_workspace_model_default = ?,
-        provider = ?,
-        model = ?,
-        credential_id = ?,
-        base_url = ?,
-        output_path = ?,
-        temperature = ?,
-        allow_human_input = ?,
-        tool_policy = ?,
-        execution_mode = ?,
-        workspace_id = ?,
-        entry_file = ?,
-        run_command = ?,
-        updated_at = ?
-      WHERE run_id = ? AND node_id = ?`,
-    ).run(
-      next.name,
-      next.description ?? null,
-      next.responsibility ?? null,
-      next.systemPrompt ?? null,
-      next.additionalPrompt ?? null,
-      next.useWorkspaceModelDefault ? 1 : 0,
-      next.provider ?? null,
-      next.model ?? null,
-      next.credentialId ?? null,
-      next.baseUrl ?? null,
-      next.outputPath ?? null,
-      next.temperature ?? null,
-      next.allowHumanInput ? 1 : 0,
-      next.toolPolicy,
-      next.executionMode ?? "standard",
-      next.workspaceId ?? null,
-      next.entryFile ?? null,
-      next.runCommand ?? null,
-      next.updatedAt,
-      runId,
-      nodeId,
-    );
-
-    return next;
+    return this.workspaceConfigService.updateNodeConfig(runId, nodeId, payload);
   }
 
   listNodeDocuments(runId: string, nodeId: string) {
@@ -1621,7 +1490,11 @@ class ConfigService {
     }
     const normalized: ProjectSettings = {};
     if (payload.defaultProvider !== undefined) {
-      normalized.defaultProvider = payload.defaultProvider.trim() || undefined;
+      const provider = payload.defaultProvider.trim();
+      if (provider.toLowerCase() === "mock") {
+        throw new Error("mock provider has been disabled. Please configure a real LLM provider.");
+      }
+      normalized.defaultProvider = provider || undefined;
     }
     if (payload.defaultModel !== undefined) {
       normalized.defaultModel = payload.defaultModel.trim() || undefined;
@@ -1683,77 +1556,15 @@ class ConfigService {
   }
 
   listProjects(options?: { includeArchived?: boolean }): ProjectSummary[] {
-    const includeArchived = options?.includeArchived === true;
-    const rows = db
-      .prepare(
-        `SELECT
-          p.*,
-          (SELECT COUNT(1) FROM workflow_definition w WHERE w.project_id = p.id) AS workflow_count,
-          (SELECT COUNT(1) FROM run_snapshot rs INNER JOIN workflow_definition w ON w.id = rs.workflow_id WHERE w.project_id = p.id) AS run_count,
-          (SELECT COUNT(1) FROM project_file pf WHERE pf.project_id = p.id) AS file_count
-        FROM project p
-        ${includeArchived ? "" : "WHERE p.archived_at IS NULL"}
-        ORDER BY p.updated_at DESC`,
-      )
-      .all() as ProjectRow[];
-    return rows.map((row) => this.toProjectSummary(row));
+    return this.projectCatalogService.listProjects(options);
   }
 
   getProject(projectId: string): ProjectSummary | null {
-    const row = db
-      .prepare(
-        `SELECT
-          p.*,
-          (SELECT COUNT(1) FROM workflow_definition w WHERE w.project_id = p.id) AS workflow_count,
-          (SELECT COUNT(1) FROM run_snapshot rs INNER JOIN workflow_definition w ON w.id = rs.workflow_id WHERE w.project_id = p.id) AS run_count,
-          (SELECT COUNT(1) FROM project_file pf WHERE pf.project_id = p.id) AS file_count
-        FROM project p
-        WHERE p.id = ?`,
-      )
-      .get(projectId) as ProjectRow | undefined;
-    return row ? this.toProjectSummary(row) : null;
+    return this.projectCatalogService.getProject(projectId);
   }
 
   createProject(payload: { name: string; description?: string }) {
-    const now = nowIso();
-    const project: ProjectSummary = {
-      id: makeId("proj"),
-      name: payload.name.trim(),
-      description: payload.description?.trim() || undefined,
-      settings: {},
-      archivedAt: undefined,
-      settingsUpdatedAt: now,
-      workflowCount: 0,
-      runCount: 0,
-      fileCount: 0,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    db.prepare(
-      `INSERT INTO project (
-        id, name, description,
-        default_provider, default_model, default_base_url, default_credential_id, default_temperature, project_notes,
-        archived_at, settings_updated_at, created_at, updated_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      project.id,
-      project.name,
-      project.description ?? null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      project.settingsUpdatedAt ?? now,
-      project.createdAt,
-      project.updatedAt,
-    );
-
-    return project;
+    return this.projectCatalogService.createProject(payload);
   }
 
   updateProject(
@@ -1765,84 +1576,11 @@ class ConfigService {
       archived?: boolean;
     },
   ) {
-    const existing = this.getProject(projectId);
-    if (!existing) {
-      throw new Error("项目不存在");
-    }
-
-    const nextName = payload.name !== undefined ? payload.name.trim() : existing.name;
-    if (!nextName) {
-      throw new Error("项目名称不能为空");
-    }
-
-    const hasDescription = payload.description !== undefined;
-    const nextDescription = hasDescription ? payload.description?.trim() || undefined : existing.description;
-    const hasSettings = payload.settings !== undefined;
-    const normalizedSettings = hasSettings ? this.normalizeProjectSettings(payload.settings) : {};
-    const nextSettings: ProjectSettings = hasSettings
-      ? {
-          ...existing.settings,
-          ...normalizedSettings,
-        }
-      : existing.settings;
-
-    if (nextSettings.defaultTemperature !== undefined) {
-      if (nextSettings.defaultTemperature < 0 || nextSettings.defaultTemperature > 2) {
-        throw new Error("默认温度需在 0 到 2 之间");
-      }
-    }
-
-    const now = nowIso();
-    const nextArchivedAt =
-      payload.archived === undefined
-        ? existing.archivedAt
-        : payload.archived
-          ? (existing.archivedAt ?? now)
-          : undefined;
-    const settingsUpdatedAt = hasSettings ? now : existing.settingsUpdatedAt ?? now;
-
-    db.prepare(
-      `UPDATE project
-       SET
-        name = ?,
-        description = ?,
-        default_provider = ?,
-        default_model = ?,
-        default_base_url = ?,
-        default_credential_id = ?,
-        default_temperature = ?,
-        project_notes = ?,
-        archived_at = ?,
-        settings_updated_at = ?,
-        updated_at = ?
-       WHERE id = ?`,
-    ).run(
-      nextName,
-      nextDescription ?? null,
-      nextSettings.defaultProvider ?? null,
-      nextSettings.defaultModel ?? null,
-      nextSettings.defaultBaseUrl ?? null,
-      nextSettings.defaultCredentialId ?? null,
-      nextSettings.defaultTemperature ?? null,
-      nextSettings.projectNotes ?? null,
-      nextArchivedAt ?? null,
-      settingsUpdatedAt,
-      now,
-      projectId,
-    );
-
-    const updated = this.getProject(projectId);
-    if (!updated) {
-      throw new Error("项目不存在");
-    }
-    return updated;
+    return this.projectCatalogService.updateProject(projectId, payload);
   }
 
   listModelAssets() {
-    const rows = db
-      .prepare("SELECT * FROM model_asset ORDER BY updated_at DESC")
-      .all() as ModelAssetRow[];
-    return rows.map(toModelAsset);
+    return this.assetCatalogService.listModelAssets();
   }
 
   createModelAsset(payload: {
@@ -1853,41 +1591,7 @@ class ConfigService {
     credentialId?: string;
     enabled?: boolean;
   }) {
-    const name = payload.name.trim();
-    const provider = payload.provider.trim();
-    const model = payload.model.trim();
-    if (!name || !provider || !model) {
-      throw new Error("模型资产名称、服务商、模型不能为空");
-    }
-    if (payload.credentialId) {
-      const credential = this.getCredentialById(payload.credentialId);
-      if (!credential) {
-        throw new Error("凭证不存在");
-      }
-    }
-
-    const now = nowIso();
-    const id = makeId("asset_model");
-    db.prepare(
-      `INSERT INTO model_asset (
-        id, name, provider, model, base_url, credential_id, enabled, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      id,
-      name,
-      provider,
-      model,
-      payload.baseUrl?.trim() || null,
-      payload.credentialId?.trim() || null,
-      payload.enabled === false ? 0 : 1,
-      now,
-      now,
-    );
-    const row = db.prepare("SELECT * FROM model_asset WHERE id = ?").get(id) as ModelAssetRow | undefined;
-    if (!row) {
-      throw new Error("创建模型资产失败");
-    }
-    return toModelAsset(row);
+    return this.assetCatalogService.createModelAsset(payload);
   }
 
   updateModelAsset(
@@ -1901,67 +1605,15 @@ class ConfigService {
       enabled: boolean;
     }>,
   ) {
-    const row = db.prepare("SELECT * FROM model_asset WHERE id = ?").get(assetId) as ModelAssetRow | undefined;
-    if (!row) {
-      throw new Error("模型资产不存在");
-    }
-
-    const nextName = payload.name !== undefined ? payload.name.trim() : row.name;
-    const nextProvider = payload.provider !== undefined ? payload.provider.trim() : row.provider;
-    const nextModel = payload.model !== undefined ? payload.model.trim() : row.model;
-    if (!nextName || !nextProvider || !nextModel) {
-      throw new Error("模型资产名称、服务商、模型不能为空");
-    }
-
-    const nextCredentialId = payload.credentialId !== undefined ? payload.credentialId.trim() || null : row.credential_id;
-    if (nextCredentialId) {
-      const credential = this.getCredentialById(nextCredentialId);
-      if (!credential) {
-        throw new Error("凭证不存在");
-      }
-    }
-
-    const now = nowIso();
-    db.prepare(
-      `UPDATE model_asset
-       SET name = ?, provider = ?, model = ?, base_url = ?, credential_id = ?, enabled = ?, updated_at = ?
-       WHERE id = ?`,
-    ).run(
-      nextName,
-      nextProvider,
-      nextModel,
-      payload.baseUrl !== undefined ? payload.baseUrl.trim() || null : row.base_url,
-      nextCredentialId,
-      payload.enabled !== undefined ? (payload.enabled ? 1 : 0) : row.enabled,
-      now,
-      assetId,
-    );
-    const updated = db.prepare("SELECT * FROM model_asset WHERE id = ?").get(assetId) as ModelAssetRow | undefined;
-    if (!updated) {
-      throw new Error("模型资产不存在");
-    }
-    return toModelAsset(updated);
+    return this.assetCatalogService.updateModelAsset(assetId, payload);
   }
 
   deleteModelAsset(assetId: string) {
-    const row = db.prepare("SELECT * FROM model_asset WHERE id = ?").get(assetId) as ModelAssetRow | undefined;
-    if (!row) {
-      throw new Error("模型资产不存在");
-    }
-    db.prepare("DELETE FROM workflow_asset_reference WHERE asset_type = 'model' AND asset_id = ?").run(assetId);
-    db.prepare("DELETE FROM model_asset WHERE id = ?").run(assetId);
-    return { id: assetId };
+    return this.assetCatalogService.deleteModelAsset(assetId);
   }
 
   listPromptTemplateAssets(templateType?: "system" | "agent" | "workflow") {
-    const rows = templateType
-      ? (db
-          .prepare("SELECT * FROM prompt_template_asset WHERE template_type = ? ORDER BY updated_at DESC")
-          .all(templateType) as PromptTemplateAssetRow[])
-      : (db
-          .prepare("SELECT * FROM prompt_template_asset ORDER BY updated_at DESC")
-          .all() as PromptTemplateAssetRow[]);
-    return rows.map(toPromptTemplateAsset);
+    return this.assetCatalogService.listPromptTemplateAssets(templateType);
   }
 
   createPromptTemplateAsset(payload: {
@@ -1971,33 +1623,7 @@ class ConfigService {
     content: string;
     enabled?: boolean;
   }) {
-    const name = payload.name.trim();
-    const content = payload.content.trim();
-    if (!name || !content) {
-      throw new Error("Prompt 模板名称和内容不能为空");
-    }
-    const templateType = normalizePromptTemplateType(payload.templateType);
-    const now = nowIso();
-    const id = makeId("asset_prompt");
-    db.prepare(
-      `INSERT INTO prompt_template_asset (
-        id, name, template_type, description, content, enabled, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      id,
-      name,
-      templateType,
-      payload.description?.trim() || null,
-      content,
-      payload.enabled === false ? 0 : 1,
-      now,
-      now,
-    );
-    const row = db.prepare("SELECT * FROM prompt_template_asset WHERE id = ?").get(id) as PromptTemplateAssetRow | undefined;
-    if (!row) {
-      throw new Error("创建 Prompt 模板失败");
-    }
-    return toPromptTemplateAsset(row);
+    return this.assetCatalogService.createPromptTemplateAsset(payload);
   }
 
   updatePromptTemplateAsset(
@@ -2010,62 +1636,19 @@ class ConfigService {
       enabled: boolean;
     }>,
   ) {
-    const row = db.prepare("SELECT * FROM prompt_template_asset WHERE id = ?").get(templateId) as PromptTemplateAssetRow | undefined;
-    if (!row) {
-      throw new Error("Prompt 模板不存在");
-    }
-
-    const nextName = payload.name !== undefined ? payload.name.trim() : row.name;
-    const nextContent = payload.content !== undefined ? payload.content.trim() : row.content;
-    if (!nextName || !nextContent) {
-      throw new Error("Prompt 模板名称和内容不能为空");
-    }
-
-    const now = nowIso();
-    db.prepare(
-      `UPDATE prompt_template_asset
-       SET name = ?, template_type = ?, description = ?, content = ?, enabled = ?, updated_at = ?
-       WHERE id = ?`,
-    ).run(
-      nextName,
-      payload.templateType !== undefined ? normalizePromptTemplateType(payload.templateType) : row.template_type,
-      payload.description !== undefined ? payload.description.trim() || null : row.description,
-      nextContent,
-      payload.enabled !== undefined ? (payload.enabled ? 1 : 0) : row.enabled,
-      now,
-      templateId,
-    );
-    const updated = db.prepare("SELECT * FROM prompt_template_asset WHERE id = ?").get(templateId) as PromptTemplateAssetRow | undefined;
-    if (!updated) {
-      throw new Error("Prompt 模板不存在");
-    }
-    return toPromptTemplateAsset(updated);
+    return this.assetCatalogService.updatePromptTemplateAsset(templateId, payload);
   }
 
   deletePromptTemplateAsset(templateId: string) {
-    const row = db.prepare("SELECT * FROM prompt_template_asset WHERE id = ?").get(templateId) as PromptTemplateAssetRow | undefined;
-    if (!row) {
-      throw new Error("Prompt 模板不存在");
-    }
-    db.prepare("DELETE FROM workflow_asset_reference WHERE asset_type = 'prompt_template' AND asset_id = ?").run(templateId);
-    db.prepare("DELETE FROM prompt_template_asset WHERE id = ?").run(templateId);
-    return { id: templateId };
+    return this.assetCatalogService.deletePromptTemplateAsset(templateId);
   }
 
   listWorkflowTemplates() {
-    this.ensureBuiltinWorkflowTemplates();
-    const rows = db
-      .prepare("SELECT * FROM workflow_template ORDER BY updated_at DESC")
-      .all() as WorkflowTemplateRow[];
-    return rows.map(toWorkflowTemplateAsset);
+    return this.assetCatalogService.listWorkflowTemplates();
   }
 
   getWorkflowTemplate(templateId: string) {
-    this.ensureBuiltinWorkflowTemplates();
-    const row = db
-      .prepare("SELECT * FROM workflow_template WHERE id = ?")
-      .get(templateId) as WorkflowTemplateRow | undefined;
-    return row ? toWorkflowTemplateAsset(row) : null;
+    return this.assetCatalogService.getWorkflowTemplate(templateId);
   }
 
   createWorkflowTemplate(payload: {
@@ -2078,33 +1661,7 @@ class ConfigService {
     tasks: StoredWorkflowTask[];
     enabled?: boolean;
   }) {
-    const name = payload.name.trim();
-    if (!name) {
-      throw new Error("工作流模板名称不能为空");
-    }
-    const now = nowIso();
-    const id = payload.id?.trim() || makeId("wf_tpl");
-    db.prepare(
-      `INSERT INTO workflow_template (
-        id, name, description, root_task_input, nodes_json, edges_json, tasks_json, enabled, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      id,
-      name,
-      payload.description?.trim() || null,
-      payload.rootTaskInput?.trim() || null,
-      JSON.stringify(payload.nodes ?? []),
-      JSON.stringify(payload.edges ?? []),
-      JSON.stringify(payload.tasks ?? []),
-      payload.enabled === false ? 0 : 1,
-      now,
-      now,
-    );
-    const row = db.prepare("SELECT * FROM workflow_template WHERE id = ?").get(id) as WorkflowTemplateRow | undefined;
-    if (!row) {
-      throw new Error("创建工作流模板失败");
-    }
-    return toWorkflowTemplateAsset(row);
+    return this.assetCatalogService.createWorkflowTemplate(payload);
   }
 
   updateWorkflowTemplate(
@@ -2119,52 +1676,15 @@ class ConfigService {
       enabled: boolean;
     }>,
   ) {
-    const row = db.prepare("SELECT * FROM workflow_template WHERE id = ?").get(templateId) as WorkflowTemplateRow | undefined;
-    if (!row) {
-      throw new Error("工作流模板不存在");
-    }
-    const nextName = payload.name !== undefined ? payload.name.trim() : row.name;
-    if (!nextName) {
-      throw new Error("工作流模板名称不能为空");
-    }
-
-    const now = nowIso();
-    db.prepare(
-      `UPDATE workflow_template
-       SET name = ?, description = ?, root_task_input = ?, nodes_json = ?, edges_json = ?, tasks_json = ?, enabled = ?, updated_at = ?
-       WHERE id = ?`,
-    ).run(
-      nextName,
-      payload.description !== undefined ? payload.description.trim() || null : row.description,
-      payload.rootTaskInput !== undefined ? payload.rootTaskInput.trim() || null : row.root_task_input,
-      payload.nodes !== undefined ? JSON.stringify(payload.nodes) : row.nodes_json,
-      payload.edges !== undefined ? JSON.stringify(payload.edges) : row.edges_json,
-      payload.tasks !== undefined ? JSON.stringify(payload.tasks) : row.tasks_json,
-      payload.enabled !== undefined ? (payload.enabled ? 1 : 0) : row.enabled,
-      now,
-      templateId,
-    );
-    const updated = db.prepare("SELECT * FROM workflow_template WHERE id = ?").get(templateId) as WorkflowTemplateRow | undefined;
-    if (!updated) {
-      throw new Error("工作流模板不存在");
-    }
-    return toWorkflowTemplateAsset(updated);
+    return this.assetCatalogService.updateWorkflowTemplate(templateId, payload);
   }
 
   deleteWorkflowTemplate(templateId: string) {
-    const row = db.prepare("SELECT * FROM workflow_template WHERE id = ?").get(templateId) as WorkflowTemplateRow | undefined;
-    if (!row) {
-      throw new Error("工作流模板不存在");
-    }
-    db.prepare("DELETE FROM workflow_template WHERE id = ?").run(templateId);
-    return { id: templateId };
+    return this.assetCatalogService.deleteWorkflowTemplate(templateId);
   }
 
   listAgentTemplates() {
-    const rows = db
-      .prepare("SELECT * FROM agent_template ORDER BY updated_at DESC")
-      .all() as AgentTemplateRow[];
-    return rows.map(toAgentTemplateAsset);
+    return this.assetCatalogService.listAgentTemplates();
   }
 
   createAgentTemplate(payload: {
@@ -2176,34 +1696,7 @@ class ConfigService {
     responsibilitySummary?: string;
     enabled?: boolean;
   }) {
-    const name = payload.name.trim();
-    const role = payload.role.trim();
-    if (!name || !role) {
-      throw new Error("Agent 模板名称和角色不能为空");
-    }
-    const now = nowIso();
-    const id = makeId("agent_tpl");
-    db.prepare(
-      `INSERT INTO agent_template (
-        id, name, description, role, default_prompt, task_summary, responsibility_summary, enabled, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      id,
-      name,
-      payload.description?.trim() || null,
-      role,
-      payload.defaultPrompt?.trim() || null,
-      payload.taskSummary?.trim() || null,
-      payload.responsibilitySummary?.trim() || null,
-      payload.enabled === false ? 0 : 1,
-      now,
-      now,
-    );
-    const row = db.prepare("SELECT * FROM agent_template WHERE id = ?").get(id) as AgentTemplateRow | undefined;
-    if (!row) {
-      throw new Error("创建 Agent 模板失败");
-    }
-    return toAgentTemplateAsset(row);
+    return this.assetCatalogService.createAgentTemplate(payload);
   }
 
   updateAgentTemplate(
@@ -2218,47 +1711,11 @@ class ConfigService {
       enabled: boolean;
     }>,
   ) {
-    const row = db.prepare("SELECT * FROM agent_template WHERE id = ?").get(templateId) as AgentTemplateRow | undefined;
-    if (!row) {
-      throw new Error("Agent 模板不存在");
-    }
-
-    const nextName = payload.name !== undefined ? payload.name.trim() : row.name;
-    const nextRole = payload.role !== undefined ? payload.role.trim() : row.role;
-    if (!nextName || !nextRole) {
-      throw new Error("Agent 模板名称和角色不能为空");
-    }
-
-    const now = nowIso();
-    db.prepare(
-      `UPDATE agent_template
-       SET name = ?, description = ?, role = ?, default_prompt = ?, task_summary = ?, responsibility_summary = ?, enabled = ?, updated_at = ?
-       WHERE id = ?`,
-    ).run(
-      nextName,
-      payload.description !== undefined ? payload.description.trim() || null : row.description,
-      nextRole,
-      payload.defaultPrompt !== undefined ? payload.defaultPrompt.trim() || null : row.default_prompt,
-      payload.taskSummary !== undefined ? payload.taskSummary.trim() || null : row.task_summary,
-      payload.responsibilitySummary !== undefined ? payload.responsibilitySummary.trim() || null : row.responsibility_summary,
-      payload.enabled !== undefined ? (payload.enabled ? 1 : 0) : row.enabled,
-      now,
-      templateId,
-    );
-    const updated = db.prepare("SELECT * FROM agent_template WHERE id = ?").get(templateId) as AgentTemplateRow | undefined;
-    if (!updated) {
-      throw new Error("Agent 模板不存在");
-    }
-    return toAgentTemplateAsset(updated);
+    return this.assetCatalogService.updateAgentTemplate(templateId, payload);
   }
 
   deleteAgentTemplate(templateId: string) {
-    const row = db.prepare("SELECT * FROM agent_template WHERE id = ?").get(templateId) as AgentTemplateRow | undefined;
-    if (!row) {
-      throw new Error("Agent 模板不存在");
-    }
-    db.prepare("DELETE FROM agent_template WHERE id = ?").run(templateId);
-    return { id: templateId };
+    return this.assetCatalogService.deleteAgentTemplate(templateId);
   }
 
   listWorkflowAssetReferences(options?: {
@@ -2371,15 +1828,11 @@ class ConfigService {
   // ── Script Asset CRUD ──
 
   listScriptAssets() {
-    const rows = db
-      .prepare("SELECT * FROM script_asset ORDER BY updated_at DESC")
-      .all() as ScriptAssetRow[];
-    return rows.map(toScriptAsset);
+    return this.assetCatalogService.listScriptAssets();
   }
 
   getScriptAsset(assetId: string) {
-    const row = db.prepare("SELECT * FROM script_asset WHERE id = ?").get(assetId) as ScriptAssetRow | undefined;
-    return row ? toScriptAsset(row) : null;
+    return this.assetCatalogService.getScriptAsset(assetId);
   }
 
   createScriptAsset(payload: {
@@ -2391,35 +1844,7 @@ class ConfigService {
     defaultEnvironmentId?: string;
     enabled?: boolean;
   }) {
-    const name = payload.name.trim();
-    const localPath = payload.localPath.trim();
-    const runCommand = payload.runCommand.trim();
-    if (!name || !localPath || !runCommand) {
-      throw new Error("脚本资产名称、本地路径、运行命令不能为空");
-    }
-
-    const now = nowIso();
-    const id = makeId("asset_script");
-    db.prepare(
-      `INSERT INTO script_asset (
-        id, name, description, local_path, run_command, parameter_schema,
-        default_environment_id, enabled, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      id,
-      name,
-      payload.description?.trim() || null,
-      localPath,
-      runCommand,
-      JSON.stringify(payload.parameterSchema ?? {}),
-      payload.defaultEnvironmentId?.trim() || null,
-      payload.enabled === false ? 0 : 1,
-      now,
-      now,
-    );
-    const row = db.prepare("SELECT * FROM script_asset WHERE id = ?").get(id) as ScriptAssetRow | undefined;
-    if (!row) throw new Error("创建脚本资产失败");
-    return toScriptAsset(row);
+    return this.assetCatalogService.createScriptAsset(payload);
   }
 
   updateScriptAsset(
@@ -2434,103 +1859,35 @@ class ConfigService {
       enabled: boolean;
     }>,
   ) {
-    const row = db.prepare("SELECT * FROM script_asset WHERE id = ?").get(assetId) as ScriptAssetRow | undefined;
-    if (!row) throw new Error("脚本资产不存在");
-
-    const nextName = payload.name !== undefined ? payload.name.trim() : row.name;
-    const nextLocalPath = payload.localPath !== undefined ? payload.localPath.trim() : row.local_path;
-    const nextRunCommand = payload.runCommand !== undefined ? payload.runCommand.trim() : row.run_command;
-    if (!nextName || !nextLocalPath || !nextRunCommand) {
-      throw new Error("脚本资产名称、本地路径、运行命令不能为空");
-    }
-
-    const now = nowIso();
-    db.prepare(
-      `UPDATE script_asset
-       SET name = ?, description = ?, local_path = ?, run_command = ?, parameter_schema = ?,
-           default_environment_id = ?, enabled = ?, updated_at = ?
-       WHERE id = ?`,
-    ).run(
-      nextName,
-      payload.description !== undefined ? payload.description.trim() || null : row.description,
-      nextLocalPath,
-      nextRunCommand,
-      payload.parameterSchema !== undefined ? JSON.stringify(payload.parameterSchema) : row.parameter_schema,
-      payload.defaultEnvironmentId !== undefined ? payload.defaultEnvironmentId.trim() || null : row.default_environment_id,
-      payload.enabled !== undefined ? (payload.enabled ? 1 : 0) : row.enabled,
-      now,
-      assetId,
-    );
-    const updated = db.prepare("SELECT * FROM script_asset WHERE id = ?").get(assetId) as ScriptAssetRow | undefined;
-    if (!updated) throw new Error("脚本资产不存在");
-    return toScriptAsset(updated);
+    return this.assetCatalogService.updateScriptAsset(assetId, payload);
   }
 
   deleteScriptAsset(assetId: string) {
-    const row = db.prepare("SELECT * FROM script_asset WHERE id = ?").get(assetId) as ScriptAssetRow | undefined;
-    if (!row) throw new Error("脚本资产不存在");
-    // Cascade: delete skills that reference this script, their bindings, and asset references
-    const skills = db.prepare("SELECT id FROM skill_asset WHERE script_id = ?").all(assetId) as { id: string }[];
-    for (const skill of skills) {
-      db.prepare("DELETE FROM skill_binding WHERE skill_id = ?").run(skill.id);
-    }
-    db.prepare("DELETE FROM skill_asset WHERE script_id = ?").run(assetId);
-    db.prepare("DELETE FROM script_asset WHERE id = ?").run(assetId);
-    return { id: assetId };
+    return this.assetCatalogService.deleteScriptAsset(assetId);
   }
 
   // ── Skill Asset CRUD ──
 
   listSkillAssets() {
-    const rows = db
-      .prepare("SELECT * FROM skill_asset ORDER BY updated_at DESC")
-      .all() as SkillAssetRow[];
-    return rows.map(toSkillAsset);
+    return this.assetCatalogService.listSkillAssets();
   }
 
   getSkillAsset(assetId: string) {
-    const row = db.prepare("SELECT * FROM skill_asset WHERE id = ?").get(assetId) as SkillAssetRow | undefined;
-    return row ? toSkillAsset(row) : null;
+    return this.assetCatalogService.getSkillAsset(assetId);
   }
 
   createSkillAsset(payload: {
     name: string;
     scriptId: string;
     description?: string;
+    guideContent?: string;
+    planningHint?: string;
+    runtimeProfileId?: string;
     parameterMapping?: Record<string, string>;
     outputDescription?: string;
     enabled?: boolean;
   }) {
-    const name = payload.name.trim();
-    const scriptId = payload.scriptId.trim();
-    if (!name || !scriptId) {
-      throw new Error("技能资产名称和绑定脚本不能为空");
-    }
-    // Verify script exists
-    const script = db.prepare("SELECT id FROM script_asset WHERE id = ?").get(scriptId) as { id: string } | undefined;
-    if (!script) throw new Error("绑定的脚本资产不存在");
-
-    const now = nowIso();
-    const id = makeId("asset_skill");
-    db.prepare(
-      `INSERT INTO skill_asset (
-        id, name, description, script_id, parameter_mapping, output_description,
-        enabled, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      id,
-      name,
-      payload.description?.trim() || null,
-      scriptId,
-      JSON.stringify(payload.parameterMapping ?? {}),
-      payload.outputDescription?.trim() || null,
-      payload.enabled === false ? 0 : 1,
-      now,
-      now,
-    );
-    const row = db.prepare("SELECT * FROM skill_asset WHERE id = ?").get(id) as SkillAssetRow | undefined;
-    if (!row) throw new Error("创建技能资产失败");
-    return toSkillAsset(row);
+    return this.assetCatalogService.createSkillAsset(payload);
   }
 
   updateSkillAsset(
@@ -2538,52 +1895,20 @@ class ConfigService {
     payload: Partial<{
       name: string;
       description: string;
+      guideContent: string;
+      planningHint: string;
+      runtimeProfileId: string;
       scriptId: string;
       parameterMapping: Record<string, string>;
       outputDescription: string;
       enabled: boolean;
     }>,
   ) {
-    const row = db.prepare("SELECT * FROM skill_asset WHERE id = ?").get(assetId) as SkillAssetRow | undefined;
-    if (!row) throw new Error("技能资产不存在");
-
-    const nextName = payload.name !== undefined ? payload.name.trim() : row.name;
-    const nextScriptId = payload.scriptId !== undefined ? payload.scriptId.trim() : row.script_id;
-    if (!nextName || !nextScriptId) {
-      throw new Error("技能资产名称和绑定脚本不能为空");
-    }
-    if (payload.scriptId !== undefined) {
-      const script = db.prepare("SELECT id FROM script_asset WHERE id = ?").get(nextScriptId) as { id: string } | undefined;
-      if (!script) throw new Error("绑定的脚本资产不存在");
-    }
-
-    const now = nowIso();
-    db.prepare(
-      `UPDATE skill_asset
-       SET name = ?, description = ?, script_id = ?, parameter_mapping = ?,
-           output_description = ?, enabled = ?, updated_at = ?
-       WHERE id = ?`,
-    ).run(
-      nextName,
-      payload.description !== undefined ? payload.description.trim() || null : row.description,
-      nextScriptId,
-      payload.parameterMapping !== undefined ? JSON.stringify(payload.parameterMapping) : row.parameter_mapping,
-      payload.outputDescription !== undefined ? payload.outputDescription.trim() || null : row.output_description,
-      payload.enabled !== undefined ? (payload.enabled ? 1 : 0) : row.enabled,
-      now,
-      assetId,
-    );
-    const updated = db.prepare("SELECT * FROM skill_asset WHERE id = ?").get(assetId) as SkillAssetRow | undefined;
-    if (!updated) throw new Error("技能资产不存在");
-    return toSkillAsset(updated);
+    return this.assetCatalogService.updateSkillAsset(assetId, payload);
   }
 
   deleteSkillAsset(assetId: string) {
-    const row = db.prepare("SELECT * FROM skill_asset WHERE id = ?").get(assetId) as SkillAssetRow | undefined;
-    if (!row) throw new Error("技能资产不存在");
-    db.prepare("DELETE FROM skill_binding WHERE skill_id = ?").run(assetId);
-    db.prepare("DELETE FROM skill_asset WHERE id = ?").run(assetId);
-    return { id: assetId };
+    return this.assetCatalogService.deleteSkillAsset(assetId);
   }
 
   // ── Skill Binding CRUD ──
@@ -2694,84 +2019,7 @@ class ConfigService {
   }
 
   registerRunArtifacts(runId: string): ProjectFileSummary[] {
-    const row = db
-      .prepare(
-        `SELECT
-          rs.run_id,
-          rs.workflow_id,
-          rs.output,
-          rs.error,
-          rs.finished_at,
-          rs.created_at,
-          wf.project_id,
-          wf.name AS workflow_name
-        FROM run_snapshot rs
-        LEFT JOIN workflow_definition wf ON wf.id = rs.workflow_id
-        WHERE rs.run_id = ?
-        LIMIT 1`,
-      )
-      .get(runId) as
-      | {
-          run_id: string;
-          workflow_id: string | null;
-          output: string | null;
-          error: string | null;
-          finished_at: string | null;
-          created_at: string;
-          project_id: string | null;
-          workflow_name: string | null;
-        }
-      | undefined;
-
-    if (!row || !row.project_id) {
-      return [];
-    }
-
-    const artifacts: ProjectFileSummary[] = [];
-    const output = row.output?.trim();
-    if (output) {
-      let outputJson: unknown = undefined;
-      try {
-        outputJson = JSON.parse(output);
-      } catch {
-        outputJson = undefined;
-      }
-      const fileType = outputJson !== undefined ? "json" : "txt";
-      const ext = fileType === "json" ? "json" : "txt";
-      const summary = this.upsertProjectFile({
-        id: `file_${runId}_output`,
-        projectId: row.project_id,
-        runId,
-        workflowId: row.workflow_id ?? undefined,
-        workflowName: row.workflow_name ?? undefined,
-        name: `运行输出-${runId.slice(-6)}.${ext}`,
-        type: fileType,
-        size: Buffer.byteLength(output, "utf8"),
-        sourceType: "run_output",
-        contentText: output,
-        contentJson: outputJson,
-      });
-      artifacts.push(summary);
-    }
-
-    const error = row.error?.trim();
-    if (error) {
-      const summary = this.upsertProjectFile({
-        id: `file_${runId}_error`,
-        projectId: row.project_id,
-        runId,
-        workflowId: row.workflow_id ?? undefined,
-        workflowName: row.workflow_name ?? undefined,
-        name: `运行日志-${runId.slice(-6)}.log`,
-        type: "log",
-        size: Buffer.byteLength(error, "utf8"),
-        sourceType: "run_output",
-        contentText: error,
-      });
-      artifacts.push(summary);
-    }
-
-    return artifacts;
+    return this.artifactIndexService.registerRunArtifacts(runId);
   }
 
   private listRunArtifacts(projectId: string, runId: string): ProjectFileSummary[] {
@@ -2787,50 +2035,15 @@ class ConfigService {
   }
 
   listProjectFiles(projectId: string, limit = 200): ProjectFileSummary[] {
-    const project = this.getProject(projectId);
-    if (!project) {
-      throw new Error("项目不存在");
-    }
-    const safeLimit = Math.max(1, Math.min(limit, 500));
-    const rows = db
-      .prepare(
-        `SELECT *
-         FROM project_file
-         WHERE project_id = ?
-         ORDER BY created_at DESC
-         LIMIT ?`,
-      )
-      .all(projectId, safeLimit) as ProjectFileRow[];
-    return rows.map(mapProjectFileSummary);
+    return this.artifactIndexService.listProjectFiles(projectId, limit);
   }
 
   getProjectFile(projectId: string, fileId: string): ProjectFileDetail | null {
-    const project = this.getProject(projectId);
-    if (!project) {
-      throw new Error("项目不存在");
-    }
-    const row = db
-      .prepare(
-        `SELECT *
-         FROM project_file
-         WHERE id = ? AND project_id = ?
-         LIMIT 1`,
-      )
-      .get(fileId, projectId) as ProjectFileRow | undefined;
-    return row ? mapProjectFileDetail(row) : null;
+    return this.artifactIndexService.getProjectFile(projectId, fileId);
   }
 
   listRecentFiles(limit = 10): ProjectFileSummary[] {
-    const safeLimit = Math.max(1, Math.min(limit, 100));
-    const rows = db
-      .prepare(
-        `SELECT *
-         FROM project_file
-         ORDER BY created_at DESC
-         LIMIT ?`,
-      )
-      .all(safeLimit) as ProjectFileRow[];
-    return rows.map(mapProjectFileSummary);
+    return this.artifactIndexService.listRecentFiles(limit);
   }
 
   getProjectRunDetail(projectId: string, runId: string): ProjectRunDetail | null {
@@ -3757,81 +2970,7 @@ class ConfigService {
   }
 
   listProjectRuns(projectId: string, limit = 20): ProjectRunSummary[] {
-    const project = this.getProject(projectId);
-    if (!project) {
-      throw new Error("项目不存在");
-    }
-
-    const safeLimit = Math.max(1, Math.min(limit, 200));
-    const rows = db
-      .prepare(
-        `SELECT
-          rs.run_id,
-          rs.workflow_id,
-          rs.run_type,
-          rs.status AS run_status,
-          rs.started_at,
-          rs.finished_at,
-          rs.created_at,
-          rs.output,
-          rs.error,
-          wf.project_id,
-          wf.name AS workflow_name,
-          COALESCE(tokens.prompt_tokens, 0) AS prompt_tokens,
-          COALESCE(tokens.completion_tokens, 0) AS completion_tokens,
-          COALESCE(tokens.total_tokens, 0) AS total_tokens,
-          COALESCE(tokens.token_usage_rows, 0) AS token_usage_rows
-        FROM run_snapshot rs
-        INNER JOIN workflow_definition wf ON wf.id = rs.workflow_id
-        LEFT JOIN (
-          SELECT
-            run_id,
-            SUM(COALESCE(
-              CAST(json_extract(payload_json, '$.promptTokens') AS INTEGER),
-              CAST(json_extract(payload_json, '$.prompt_tokens') AS INTEGER),
-              CAST(json_extract(payload_json, '$.tokenUsage.promptTokens') AS INTEGER),
-              CAST(json_extract(payload_json, '$.tokenUsage.prompt_tokens') AS INTEGER),
-              0
-            )) AS prompt_tokens,
-            SUM(COALESCE(
-              CAST(json_extract(payload_json, '$.completionTokens') AS INTEGER),
-              CAST(json_extract(payload_json, '$.completion_tokens') AS INTEGER),
-              CAST(json_extract(payload_json, '$.tokenUsage.completionTokens') AS INTEGER),
-              CAST(json_extract(payload_json, '$.tokenUsage.completion_tokens') AS INTEGER),
-              0
-            )) AS completion_tokens,
-            SUM(COALESCE(
-              CAST(json_extract(payload_json, '$.totalTokens') AS INTEGER),
-              CAST(json_extract(payload_json, '$.total_tokens') AS INTEGER),
-              CAST(json_extract(payload_json, '$.tokenUsage.totalTokens') AS INTEGER),
-              CAST(json_extract(payload_json, '$.tokenUsage.total_tokens') AS INTEGER),
-              0
-            )) AS total_tokens,
-            SUM(CASE
-              WHEN json_extract(payload_json, '$.promptTokens') IS NOT NULL
-                OR json_extract(payload_json, '$.prompt_tokens') IS NOT NULL
-                OR json_extract(payload_json, '$.completionTokens') IS NOT NULL
-                OR json_extract(payload_json, '$.completion_tokens') IS NOT NULL
-                OR json_extract(payload_json, '$.totalTokens') IS NOT NULL
-                OR json_extract(payload_json, '$.total_tokens') IS NOT NULL
-                OR json_extract(payload_json, '$.tokenUsage.promptTokens') IS NOT NULL
-                OR json_extract(payload_json, '$.tokenUsage.prompt_tokens') IS NOT NULL
-                OR json_extract(payload_json, '$.tokenUsage.completionTokens') IS NOT NULL
-                OR json_extract(payload_json, '$.tokenUsage.completion_tokens') IS NOT NULL
-                OR json_extract(payload_json, '$.tokenUsage.totalTokens') IS NOT NULL
-                OR json_extract(payload_json, '$.tokenUsage.total_tokens') IS NOT NULL
-              THEN 1 ELSE 0
-            END) AS token_usage_rows
-          FROM run_event
-          WHERE type = 'llm_response_received'
-          GROUP BY run_id
-        ) tokens ON tokens.run_id = rs.run_id
-        WHERE wf.project_id = ?
-        ORDER BY COALESCE(rs.started_at, rs.created_at) DESC
-        LIMIT ?`,
-      )
-      .all(projectId, safeLimit) as RunRecordRow[];
-    return rows.map(buildRunSummary);
+    return this.projectCatalogService.listProjectRuns(projectId, limit);
   }
 
   private listWorkflowVersionRows(workflowId: string) {
@@ -3944,79 +3083,27 @@ class ConfigService {
   }
 
   listWorkflows(projectId?: string): WorkflowDefinitionSummary[] {
-    const rows = projectId
-      ? (db
-          .prepare("SELECT * FROM workflow_definition WHERE project_id = ? ORDER BY updated_at DESC")
-          .all(projectId) as WorkflowRow[])
-      : (db
-          .prepare("SELECT * FROM workflow_definition ORDER BY updated_at DESC")
-          .all() as WorkflowRow[]);
-
-    return rows.map((row) => this.buildWorkflowSummary(row));
+    return this.workflowDefinitionService.listWorkflows(projectId);
   }
 
   listProjectWorkflows(projectId: string): WorkflowDefinitionSummary[] {
-    const project = this.getProject(projectId);
-    if (!project) {
-      throw new Error("项目不存在");
-    }
-    return this.listWorkflows(projectId);
+    return this.workflowDefinitionService.listProjectWorkflows(projectId);
   }
 
   listWorkflowVersions(workflowId: string): WorkflowVersionSummary[] {
-    const workflow = db.prepare("SELECT * FROM workflow_definition WHERE id = ?").get(workflowId) as WorkflowRow | undefined;
-    if (!workflow) {
-      throw new Error("工作流不存在");
-    }
-    return this.listWorkflowVersionRows(workflowId).map(toWorkflowVersionSummary);
+    return this.workflowDefinitionService.listWorkflowVersions(workflowId);
   }
 
   getWorkflow(workflowId: string, versionId?: string): WorkflowDefinition | null {
-    const row = db.prepare("SELECT * FROM workflow_definition WHERE id = ?").get(workflowId) as WorkflowRow | undefined;
-    return row ? this.buildWorkflowDetails(row, versionId) : null;
+    return this.workflowDefinitionService.getWorkflow(workflowId, versionId);
   }
 
   getProjectWorkflow(projectId: string, workflowId: string, versionId?: string): WorkflowDefinition | null {
-    const row = db
-      .prepare("SELECT * FROM workflow_definition WHERE id = ? AND project_id = ?")
-      .get(workflowId, projectId) as WorkflowRow | undefined;
-    return row ? this.buildWorkflowDetails(row, versionId) : null;
+    return this.workflowDefinitionService.getProjectWorkflow(projectId, workflowId, versionId);
   }
 
   publishWorkflowVersion(workflowId: string, versionId?: string) {
-    const workflow = db.prepare("SELECT * FROM workflow_definition WHERE id = ?").get(workflowId) as WorkflowRow | undefined;
-    if (!workflow) {
-      throw new Error("工作流不存在");
-    }
-
-    const target = this.getWorkflowVersionRow(workflowId, versionId)
-      ?? this.listWorkflowVersionRows(workflowId)[0];
-    if (!target) {
-      throw new Error("工作流版本不存在");
-    }
-
-    const publishedAt = nowIso();
-    db.prepare("UPDATE workflow_version SET published_at = ? WHERE id = ?").run(publishedAt, target.id);
-    db.prepare(
-      `UPDATE workflow_definition
-       SET published_version_id = ?, current_version_id = ?, root_task_input = ?, nodes_json = ?, edges_json = ?, tasks_json = ?, updated_at = ?
-       WHERE id = ?`,
-    ).run(
-      target.id,
-      target.id,
-      target.root_task_input,
-      target.nodes_json,
-      target.edges_json,
-      target.tasks_json,
-      publishedAt,
-      workflowId,
-    );
-
-    const refreshed = this.getWorkflow(workflowId, target.id);
-    if (!refreshed) {
-      throw new Error("工作流发布失败");
-    }
-    return refreshed;
+    return this.workflowDefinitionService.publishWorkflowVersion(workflowId, versionId);
   }
 
   saveWorkflow(payload: {
@@ -4031,115 +3118,7 @@ class ConfigService {
     versionLabel?: string;
     versionNotes?: string;
   }) {
-    const now = nowIso();
-
-    if (payload.workflowId) {
-      const exists = db.prepare("SELECT * FROM workflow_definition WHERE id = ?").get(payload.workflowId) as WorkflowRow | undefined;
-      if (!exists) {
-        throw new Error("工作流不存在");
-      }
-      const nextProjectId = payload.projectId ?? exists.project_id ?? undefined;
-      if (nextProjectId) {
-        const project = this.getProject(nextProjectId);
-        if (!project) {
-          throw new Error("项目不存在");
-        }
-      }
-
-      const nextVersionNumber = (this.listWorkflowVersionRows(payload.workflowId)[0]?.version_number ?? 0) + 1;
-      const version = this.createWorkflowVersion({
-        workflowId: payload.workflowId,
-        rootTaskInput: payload.rootTaskInput,
-        nodes: payload.nodes,
-        edges: payload.edges,
-        tasks: payload.tasks,
-        versionNumber: nextVersionNumber,
-        versionLabel: payload.versionLabel,
-        versionNotes: payload.versionNotes,
-      });
-
-      db.prepare(
-        `UPDATE workflow_definition SET
-          name = ?,
-          description = ?,
-          root_task_input = ?,
-          project_id = ?,
-          nodes_json = ?,
-          edges_json = ?,
-          tasks_json = ?,
-          current_version_id = ?,
-          updated_at = ?
-        WHERE id = ?`,
-      ).run(
-        payload.name,
-        payload.description ?? null,
-        payload.rootTaskInput ?? null,
-        nextProjectId ?? null,
-        JSON.stringify(payload.nodes),
-        JSON.stringify(payload.edges),
-        JSON.stringify(payload.tasks),
-        version.id,
-        now,
-        payload.workflowId,
-      );
-
-      const updated = this.getWorkflow(payload.workflowId, version.id);
-      if (!updated) {
-        throw new Error("工作流保存失败");
-      }
-      return updated;
-    }
-
-    const id = makeId("wf");
-    if (payload.projectId) {
-      const project = this.getProject(payload.projectId);
-      if (!project) {
-        throw new Error("项目不存在");
-      }
-    }
-    db.prepare(
-      `INSERT INTO workflow_definition (
-        id, project_id, name, description, root_task_input, nodes_json, edges_json, tasks_json,
-        is_example, current_version_id, published_version_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      id,
-      payload.projectId ?? null,
-      payload.name,
-      payload.description ?? null,
-      payload.rootTaskInput ?? null,
-      JSON.stringify(payload.nodes),
-      JSON.stringify(payload.edges),
-      JSON.stringify(payload.tasks),
-      0,
-      null,
-      null,
-      now,
-      now,
-    );
-
-    const version = this.createWorkflowVersion({
-      workflowId: id,
-      rootTaskInput: payload.rootTaskInput,
-      nodes: payload.nodes,
-      edges: payload.edges,
-      tasks: payload.tasks,
-      versionNumber: 1,
-      versionLabel: payload.versionLabel,
-      versionNotes: payload.versionNotes,
-    });
-
-    db.prepare(
-      `UPDATE workflow_definition
-       SET current_version_id = ?, updated_at = ?
-       WHERE id = ?`,
-    ).run(version.id, now, id);
-
-    const created = this.getWorkflow(id, version.id);
-    if (!created) {
-      throw new Error("工作流创建失败");
-    }
-    return created;
+    return this.workflowDefinitionService.saveWorkflow(payload);
   }
 
   resetForTests() {

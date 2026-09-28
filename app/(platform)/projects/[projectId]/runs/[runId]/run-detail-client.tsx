@@ -1,10 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { ArrowLeft, ChevronDown, ChevronUp, Bug, Cpu, MessageSquare, Wrench, GitCompare } from "lucide-react";
 
-import type { RunDetailView, RunTracesView, NodeTraceView, PromptTraceView, ToolTraceView, StateTraceView } from "@/features/workflow/adapters/runtime-client";
+import type { RunControlPlaneView, RunDetailView, RunTracesView, NodeTraceView, PromptTraceView, ToolTraceView, StateTraceView } from "@/features/workflow/adapters/runtime-client";
 import { runtimeClient } from "@/features/workflow/adapters/runtime-client";
 
 type LogLevelFilter = "all" | "info" | "warn" | "error";
@@ -150,10 +150,12 @@ export function RunDetailClient({ projectId, run }: { projectId: string; run: Ru
       </section>
 
       <section className="grid gap-3 md:grid-cols-3">
-        <Metric title="Prompt Tokens" value={run.tokenUsageAvailable ? formatNumber(run.promptTokens ?? 0) : "--"} />
-        <Metric title="Completion Tokens" value={run.tokenUsageAvailable ? formatNumber(run.completionTokens ?? 0) : "--"} />
-        <Metric title="Total Tokens" value={run.tokenUsageAvailable ? formatNumber(run.totalTokens ?? 0) : "--"} />
+        <Metric title="提示 Token" value={run.tokenUsageAvailable ? formatNumber(run.promptTokens ?? 0) : "--"} />
+        <Metric title="补全 Token" value={run.tokenUsageAvailable ? formatNumber(run.completionTokens ?? 0) : "--"} />
+        <Metric title="总 Token" value={run.tokenUsageAvailable ? formatNumber(run.totalTokens ?? 0) : "--"} />
       </section>
+
+      <RuntimeControlSection control={run.controlPlane} />
 
       <section className="rounded-xl border border-slate-200 bg-white p-4">
         <div className="mb-3 flex items-center justify-between gap-2">
@@ -447,7 +449,7 @@ export function RunDetailClient({ projectId, run }: { projectId: string; run: Ru
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <Bug className="h-4 w-4 text-indigo-500" />
-            <h2 className="text-sm font-semibold text-slate-800">Execution Debug</h2>
+            <h2 className="text-sm font-semibold text-slate-800">执行调试</h2>
           </div>
           <div className="flex items-center gap-2">
             <select
@@ -473,10 +475,10 @@ export function RunDetailClient({ projectId, run }: { projectId: string; run: Ru
 
         <div className="mb-3 flex gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1">
           {([
-            { key: "node" as DebugTab, label: "Node Trace", icon: Cpu },
-            { key: "prompt" as DebugTab, label: "Prompt Trace", icon: MessageSquare },
-            { key: "tool" as DebugTab, label: "Tool Trace", icon: Wrench },
-            { key: "state" as DebugTab, label: "State Trace", icon: GitCompare },
+            { key: "node" as DebugTab, label: "节点追踪", icon: Cpu },
+            { key: "prompt" as DebugTab, label: "Prompt 追踪", icon: MessageSquare },
+            { key: "tool" as DebugTab, label: "工具追踪", icon: Wrench },
+            { key: "state" as DebugTab, label: "状态追踪", icon: GitCompare },
           ]).map(({ key, label, icon: Icon }) => (
             <button
               key={key}
@@ -516,9 +518,9 @@ export function RunDetailClient({ projectId, run }: { projectId: string; run: Ru
         <h2 className="text-sm font-semibold text-slate-800">调试能力预留</h2>
         <p className="mt-1 text-xs text-slate-500">{run.replayHints.notes}</p>
         <div className="mt-3 grid gap-2 sm:grid-cols-3">
-          <PlaceholderCapability title="Node Replay" enabled={run.replayHints.nodeReplayReady} />
-          <PlaceholderCapability title="Step Rerun" enabled={run.replayHints.stepRerunReady} />
-          <PlaceholderCapability title="Run Compare" enabled={run.replayHints.runCompareReady} />
+          <PlaceholderCapability title="节点回放" enabled={run.replayHints.nodeReplayReady} />
+          <PlaceholderCapability title="步骤重跑" enabled={run.replayHints.stepRerunReady} />
+          <PlaceholderCapability title="运行对比" enabled={run.replayHints.runCompareReady} />
         </div>
       </section>
     </div>
@@ -528,6 +530,168 @@ export function RunDetailClient({ projectId, run }: { projectId: string; run: Ru
 /* ══════════════════════════════════════════════════════════
    Execution Debug Sub-panels
    ══════════════════════════════════════════════════════════ */
+
+function RuntimeControlSection({ control }: { control: RunControlPlaneView }) {
+  return (
+    <section className="rounded-xl border border-slate-200 bg-white p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold text-slate-800">运行时控制面板</h2>
+          <p className="mt-1 text-xs text-slate-500">
+            控制层当前状态、归属权、预算、检查点、恢复策略与最近控制动作。
+          </p>
+        </div>
+        {control.schedule ? (
+          <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">
+            调度 {control.schedule.status} / 波次 {control.schedule.currentWaveIndex}
+          </span>
+        ) : null}
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <Metric title="控制状态" value={controlStateLabel(control.run.state)} />
+        <Metric title="当前归属" value={ownerKindLabel(control.run.ownerKind)} />
+        <Metric title="活跃节点" value={control.run.activeNodeId ?? "--"} />
+        <Metric title="待审批数" value={String(control.run.pendingApprovalCount)} />
+      </div>
+
+      <div className="mt-3 grid gap-3 xl:grid-cols-2">
+        <article className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <h3 className="text-xs font-semibold text-slate-700">预算</h3>
+          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+            <BudgetStat label="步骤" used={control.run.budget.usedSteps} max={control.run.budget.maxSteps} />
+            <BudgetStat label="Token" used={control.run.budget.usedTokens} max={control.run.budget.maxTokens} />
+            <BudgetStat label="费用（USD）" used={control.run.budget.usedCostUsd} max={control.run.budget.maxCostUsd} />
+            <BudgetStat label="挂钟时间" used={control.run.budget.usedWallMs} max={control.run.budget.maxWallMs} formatter={formatDuration} />
+          </div>
+          <div className="mt-3">
+            <p className="text-xs font-semibold text-slate-700">允许的操作</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {control.run.allowedActions.length === 0 ? (
+                <span className="text-xs text-slate-500">暂无控制动作记录。</span>
+              ) : control.run.allowedActions.map((action) => (
+                <span key={`${action.actionType}-${action.label}`} className="rounded-full border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600">
+                  {action.label}
+                </span>
+              ))}
+            </div>
+          </div>
+        </article>
+
+        <article className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <h3 className="text-xs font-semibold text-slate-700">恢复 / 回放</h3>
+          <div className="mt-2 grid gap-2 text-xs text-slate-600">
+            <p><b>失败策略：</b>{recoveryDecisionLabel(control.run.recoveryPolicy.onFailure)}</p>
+            <p><b>最大重试次数：</b>{control.run.recoveryPolicy.maxRetries ?? 0}</p>
+            <p><b>回退目标：</b>{control.run.recoveryPolicy.fallbackTarget ?? "--"}</p>
+            <p><b>当前检查点：</b>{control.run.currentCheckpointId ?? "--"}</p>
+            <p><b>回放就绪：</b>{control.run.replayScope.nodeReplayReady ? "节点" : "--"} / {control.run.replayScope.stepRerunReady ? "步骤" : "--"} / {control.run.replayScope.runCompareReady ? "比对" : "--"}</p>
+          </div>
+          <div className="mt-3">
+            <p className="text-xs font-semibold text-slate-700">最近检查点</p>
+            <div className="mt-2 space-y-2">
+              {control.checkpoints.length === 0 ? (
+                <p className="text-xs text-slate-500">暂无持久化检查点。</p>
+              ) : control.checkpoints.slice(-5).reverse().map((checkpoint) => (
+                <div key={checkpoint.id} className="rounded-md border border-slate-200 bg-white px-2 py-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-medium text-slate-700">{checkpoint.nodeName}</span>
+                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-500">波次 {checkpoint.waveIndex}</span>
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] ${
+                      checkpoint.status === "completed"
+                        ? "bg-emerald-100 text-emerald-700"
+                        : checkpoint.status === "failed"
+                          ? "bg-rose-100 text-rose-700"
+                          : "bg-amber-100 text-amber-700"
+                    }`}>{checkpoint.status === "completed" ? "已完成" : checkpoint.status === "failed" ? "失败" : "进行中"}</span>
+                  </div>
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    {formatDateTime(checkpoint.startedAt)}
+                    {checkpoint.finishedAt ? ` -> ${formatDateTime(checkpoint.finishedAt)}` : ""}
+                  </p>
+                  {checkpoint.error ? <p className="mt-1 text-[11px] text-rose-600">{checkpoint.error}</p> : null}
+                </div>
+              ))}
+            </div>
+          </div>
+        </article>
+      </div>
+
+      <div className="mt-3 grid gap-3 xl:grid-cols-2">
+        <article className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <h3 className="text-xs font-semibold text-slate-700">最近控制动作</h3>
+          <div className="mt-2 space-y-2">
+            {control.recentActions.length === 0 ? (
+              <p className="text-xs text-slate-500">暂无控制动作记录。</p>
+            ) : control.recentActions.slice(0, 10).map((action) => (
+              <div key={action.id} className="rounded-md border border-slate-200 bg-white px-2 py-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-medium text-slate-700">{action.actionType}</span>
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-500">{action.status}</span>
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-500">{action.targetScope}</span>
+                  {action.nodeName ? <span className="text-[10px] text-slate-500">{action.nodeName}</span> : null}
+                </div>
+                <p className="mt-1 text-[11px] text-slate-500">
+                  归属 {ownerKindLabel(action.ownerKind)} / 发起方 {action.proposer} / {formatDateTime(action.createdAt)}
+                </p>
+                {action.recoveryDecision ? (
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    恢复策略：{recoveryDecisionLabel(action.recoveryDecision)}
+                  </p>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </article>
+
+        <article className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <h3 className="text-xs font-semibold text-slate-700">节点控制状态</h3>
+          <div className="mt-2 max-h-[360px] space-y-2 overflow-auto">
+            {control.nodeControls.length === 0 ? (
+              <p className="text-xs text-slate-500">暂无节点控制状态数据。</p>
+            ) : control.nodeControls.map((node) => (
+              <div key={node.nodeId} className="rounded-md border border-slate-200 bg-white px-2 py-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-medium text-slate-700">{node.name}</span>
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-500">{node.role}</span>
+                  <ControlStatePill state={node.state} />
+                </div>
+                <p className="mt-1 text-[11px] text-slate-500">
+                  归属 {ownerKindLabel(node.ownerKind)} / 检查点 {node.checkpointEligible ? "是" : "否"} / 回放 {node.replayEligible ? "是" : "否"} / 部分重跑 {node.partialRerunEligible ? "是" : "否"}
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {node.allowedActions.map((action) => (
+                    <span key={`${node.nodeId}-${action.actionType}-${action.label}`} className="rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] text-slate-600">
+                      {action.label}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </article>
+      </div>
+
+      {control.approvals.length > 0 ? (
+        <article className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <h3 className="text-xs font-semibold text-slate-700">审批队列</h3>
+          <div className="mt-2 space-y-2">
+            {control.approvals.map((approval) => (
+              <div key={approval.id} className="rounded-md border border-slate-200 bg-white px-2 py-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-medium text-slate-700">{approval.nodeName ?? approval.id}</span>
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-500">{approval.riskLevel}</span>
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-500">{approval.status}</span>
+                </div>
+                <p className="mt-1 text-[11px] text-slate-500">{approval.reason}</p>
+              </div>
+            ))}
+          </div>
+        </article>
+      ) : null}
+    </section>
+  );
+}
 
 function NodeTracePanel({ traces }: { traces: NodeTraceView[] }) {
   const [expandedId, setExpandedId] = useState<string | null>(traces[0]?.id ?? null);
@@ -561,14 +725,14 @@ function NodeTracePanel({ traces }: { traces: NodeTraceView[] }) {
             {expanded && (
               <div className="space-y-2 border-t border-slate-200 bg-white px-3 py-3">
                 <div className="grid gap-2 text-xs text-slate-600">
-                  <p><b>Execution ID:</b> {t.executionId}</p>
-                  <p><b>开始:</b> {formatDateTime(t.startedAt)} <b>结束:</b> {t.finishedAt ? formatDateTime(t.finishedAt) : "运行中"}</p>
-                  {t.promptTokens != null && <p><b>Tokens:</b> Prompt {formatNumber(t.promptTokens)} / Completion {formatNumber(t.completionTokens ?? 0)} / Total {formatNumber(t.totalTokens ?? 0)}</p>}
-                  {t.error && <p className="text-rose-600"><b>错误:</b> {t.error}</p>}
+                  <p><b>执行 ID：</b>{t.executionId}</p>
+                  <p><b>开始：</b>{formatDateTime(t.startedAt)} <b>结束：</b>{t.finishedAt ? formatDateTime(t.finishedAt) : "运行中"}</p>
+                  {t.promptTokens != null && <p><b>Token：</b>提示 {formatNumber(t.promptTokens)} / 补全 {formatNumber(t.completionTokens ?? 0)} / 合计 {formatNumber(t.totalTokens ?? 0)}</p>}
+                  {t.error && <p className="text-rose-600"><b>错误：</b>{t.error}</p>}
                 </div>
                 <div className="grid gap-2 lg:grid-cols-2">
-                  <StructuredBlock title="Resolved Input" value={t.resolvedInput} emptyText="无输入" compact />
-                  <StructuredBlock title="Latest Output" value={t.latestOutput} emptyText="无输出" compact />
+                  <StructuredBlock title="解析后输入" value={t.resolvedInput} emptyText="无输入" compact />
+                  <StructuredBlock title="最新输出" value={t.latestOutput} emptyText="无输出" compact />
                 </div>
               </div>
             )}
@@ -613,15 +777,15 @@ function PromptTracePanel({ traces, nodeTraces }: { traces: PromptTraceView[]; n
             {expanded && (
               <div className="space-y-2 border-t border-slate-200 bg-white px-3 py-3">
                 <StructuredBlock title="System Prompt" value={t.systemPrompt} emptyText="无 System Prompt" compact />
-                <StructuredBlock title="User Prompt" value={t.userPrompt} emptyText="无 User Prompt" compact />
-                <StructuredBlock title="Message History" value={t.messageHistoryJson} emptyText="无 Message History" compact />
-                <StructuredBlock title="Completion" value={t.completion} emptyText="无 Completion" compact />
+                <StructuredBlock title="用户提示词" value={t.userPrompt} emptyText="无用户提示词" compact />
+                <StructuredBlock title="消息历史" value={t.messageHistoryJson} emptyText="无消息历史" compact />
+                <StructuredBlock title="模型补全" value={t.completion} emptyText="无补全内容" compact />
                 {t.error && <p className="text-xs text-rose-600">错误：{t.error}</p>}
                 <p className="text-[11px] text-slate-500">
-                  {t.promptTokens != null && `Prompt: ${formatNumber(t.promptTokens)} / `}
-                  {t.completionTokens != null && `Completion: ${formatNumber(t.completionTokens)} / `}
-                  {t.totalTokens != null && `Total: ${formatNumber(t.totalTokens)}`}
-                  {t.statusCode != null && ` · Status: ${t.statusCode}`}
+                  {t.promptTokens != null && `提示：${formatNumber(t.promptTokens)} / `}
+                  {t.completionTokens != null && `补全：${formatNumber(t.completionTokens)} / `}
+                  {t.totalTokens != null && `合计：${formatNumber(t.totalTokens)}`}
+                  {t.statusCode != null && ` · 状态码：${t.statusCode}`}
                 </p>
               </div>
             )}
@@ -705,7 +869,7 @@ function StateTracePanel({ traces, nodeTraces }: { traces: StateTraceView[]; nod
             <span className="text-[10px] text-slate-400">exec: {execId.slice(0, 12)}…</span>
           </div>
           <div className="relative ml-2 space-y-2 border-l-2 border-indigo-200 pl-4">
-            {items.map((item, idx) => (
+            {items.map((item) => (
               <div key={item.id} className="relative">
                 <div className="absolute -left-[21px] top-1 h-2.5 w-2.5 rounded-full border-2 border-indigo-300 bg-white" />
                 <div className="flex items-center gap-2">
@@ -792,6 +956,107 @@ function StructuredBlock({
       )}
     </article>
   );
+}
+
+function BudgetStat({
+  label,
+  used,
+  max,
+  formatter,
+}: {
+  label: string;
+  used: number;
+  max?: number;
+  formatter?: (value: number) => string;
+}) {
+  const formatValue = formatter ?? ((value: number) => formatNumber(value));
+  return (
+    <div className="rounded-md border border-slate-200 bg-white px-3 py-2">
+      <p className="text-[11px] text-slate-500">{label}</p>
+      <p className="mt-1 text-sm font-medium text-slate-800">
+        {formatValue(used)}
+        {max !== undefined ? ` / ${formatValue(max)}` : ""}
+      </p>
+    </div>
+  );
+}
+
+function ControlStatePill({ state }: { state: string }) {
+  const label = controlStateLabel(state);
+  const className =
+    state === "completed"
+      ? "bg-emerald-100 text-emerald-700"
+      : state === "failed" || state === "terminated"
+        ? "bg-rose-100 text-rose-700"
+        : state === "waiting_human" || state === "waiting_input" || state === "waiting_approval" || state === "waiting_dependency"
+          ? "bg-amber-100 text-amber-700"
+          : state === "running" || state === "retrying"
+            ? "bg-blue-100 text-blue-700"
+            : "bg-slate-100 text-slate-600";
+  return <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${className}`}>{label}</span>;
+}
+
+function controlStateLabel(state: string) {
+  switch (state) {
+    case "pending":
+      return "Pending";
+    case "running":
+      return "Running";
+    case "waiting_human":
+      return "Waiting Human";
+    case "waiting_input":
+      return "Waiting Input";
+    case "waiting_approval":
+      return "Waiting Approval";
+    case "waiting_dependency":
+      return "Waiting Dependency";
+    case "blocked_policy":
+      return "Blocked";
+    case "retrying":
+      return "Retrying";
+    case "completed":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    case "terminated":
+      return "Terminated";
+    default:
+      return state;
+  }
+}
+
+function ownerKindLabel(kind: string) {
+  switch (kind) {
+    case "runtime":
+      return "Runtime";
+    case "planner":
+      return "Planner";
+    case "worker":
+      return "Worker";
+    case "meta_agent":
+      return "Meta-Agent";
+    case "human":
+      return "Human";
+    case "reviewer":
+      return "Reviewer";
+    default:
+      return kind;
+  }
+}
+
+function recoveryDecisionLabel(decision: string) {
+  switch (decision) {
+    case "retry":
+      return "Retry";
+    case "reroute":
+      return "Reroute";
+    case "fallback":
+      return "Fallback";
+    case "terminate":
+      return "Terminate";
+    default:
+      return decision;
+  }
 }
 
 function PlaceholderCapability({ title, enabled }: { title: string; enabled: boolean }) {

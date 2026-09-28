@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Loader2, Link2, Trash2 } from "lucide-react";
 
+import { SimpleMarkdownPreview } from "@/components/ui/simple-markdown-preview";
 import {
   runtimeClient,
   type AgentTemplateView,
@@ -114,6 +115,7 @@ export default function AssetsPage() {
   const [skillDraft, setSkillDraft] = useState({
     name: "",
     description: "",
+    guideContent: "",
     scriptId: "",
     parameterMapping: "{}",
     outputDescription: "",
@@ -551,6 +553,7 @@ export default function AssetsPage() {
         const payload = await runtimeClient.updateSkillAsset(editingSkillId, {
           name: skillDraft.name.trim(),
           description: skillDraft.description.trim() || "",
+          guideContent: skillDraft.guideContent.trim() || "",
           scriptId: skillDraft.scriptId,
           parameterMapping,
           outputDescription: skillDraft.outputDescription.trim() || "",
@@ -562,6 +565,7 @@ export default function AssetsPage() {
           name: skillDraft.name.trim(),
           scriptId: skillDraft.scriptId,
           description: skillDraft.description.trim() || undefined,
+          guideContent: skillDraft.guideContent.trim() || undefined,
           parameterMapping,
           outputDescription: skillDraft.outputDescription.trim() || undefined,
           enabled: true,
@@ -570,7 +574,7 @@ export default function AssetsPage() {
         setMessage("技能资产创建成功。");
       }
       setEditingSkillId(null);
-      setSkillDraft({ name: "", description: "", scriptId: "", parameterMapping: "{}", outputDescription: "" });
+      setSkillDraft({ name: "", description: "", guideContent: "", scriptId: "", parameterMapping: "{}", outputDescription: "" });
     } catch (err) {
       setError(err instanceof Error ? err.message : "保存技能资产失败");
     } finally {
@@ -583,6 +587,7 @@ export default function AssetsPage() {
     setSkillDraft({
       name: skill.name,
       description: skill.description ?? "",
+      guideContent: skill.guideContent ?? "",
       scriptId: skill.scriptId,
       parameterMapping: JSON.stringify(skill.parameterMapping, null, 2),
       outputDescription: skill.outputDescription ?? "",
@@ -992,7 +997,7 @@ export default function AssetsPage() {
         {!loading && tab === "skills" ? (
           <div className="space-y-4">
             <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_220px]">
-              <input value={skillDraft.name} onChange={(e) => setSkillDraft((prev) => ({ ...prev, name: e.target.value }))} className="h-10 rounded-xl border border-slate-200 px-3 text-sm outline-none ring-indigo-200 transition focus:ring-2" placeholder="技能名称（如 ppt_to_text_stage1）" />
+              <input value={skillDraft.name} onChange={(e) => setSkillDraft((prev) => ({ ...prev, name: e.target.value }))} className="h-10 rounded-xl border border-slate-200 px-3 text-sm outline-none ring-indigo-200 transition focus:ring-2" placeholder="技能名称（如 arxiv_论文下载）" />
               <select value={skillDraft.scriptId} onChange={(e) => setSkillDraft((prev) => ({ ...prev, scriptId: e.target.value }))} className="h-10 rounded-xl border border-slate-200 px-3 text-sm outline-none ring-indigo-200 transition focus:ring-2">
                 <option value="">选择绑定脚本…</option>
                 {scripts.filter((s) => s.enabled).map((s) => (
@@ -1000,17 +1005,42 @@ export default function AssetsPage() {
                 ))}
               </select>
             </div>
-            <textarea value={skillDraft.description} onChange={(e) => setSkillDraft((prev) => ({ ...prev, description: e.target.value }))} className="min-h-20 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none ring-indigo-200 transition focus:ring-2" placeholder="技能描述（给 LLM 看的语义说明，如：当需要将 PPT 转换为 markdown 文本时调用此工具）" />
+            <textarea value={skillDraft.description} onChange={(e) => setSkillDraft((prev) => ({ ...prev, description: e.target.value }))} className="min-h-20 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none ring-indigo-200 transition focus:ring-2" placeholder="技能触发说明（给 LLM 的一句话摘要，例如：当需要从 arXiv 搜索并下载论文时优先使用此技能）" />
+            <div className="grid gap-3 lg:grid-cols-2">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs text-slate-500">
+                  <span>技能说明编辑</span>
+                  <span>支持 Markdown</span>
+                </div>
+                <textarea
+                  value={skillDraft.guideContent}
+                  onChange={(e) => setSkillDraft((prev) => ({ ...prev, guideContent: e.target.value }))}
+                  className="min-h-72 w-full rounded-xl border border-slate-200 px-3 py-2 font-mono text-sm outline-none ring-indigo-200 transition focus:ring-2"
+                  placeholder={"技能中文说明（支持 Markdown）。建议写清楚：什么时候用、输入参数怎么传、输出会返回什么、注意事项，以及与绑定脚本的配合方式。"}
+                />
+              </div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs text-slate-500">
+                  <span>Markdown 预览</span>
+                  <span>按最终渲染查看</span>
+                </div>
+                <SimpleMarkdownPreview
+                  content={skillDraft.guideContent}
+                  emptyText="技能说明预览会显示在这里。"
+                  className="min-h-72"
+                />
+              </div>
+            </div>
             <div className="grid gap-2 md:grid-cols-2">
               <textarea value={skillDraft.parameterMapping} onChange={(e) => setSkillDraft((prev) => ({ ...prev, parameterMapping: e.target.value }))} className="min-h-16 rounded-xl border border-slate-200 px-3 py-2 font-mono text-xs outline-none ring-indigo-200 transition focus:ring-2" placeholder='参数映射（JSON，如 {"input_file": "input", "stage": "stage"}）' />
-              <input value={skillDraft.outputDescription} onChange={(e) => setSkillDraft((prev) => ({ ...prev, outputDescription: e.target.value }))} className="h-10 rounded-xl border border-slate-200 px-3 text-sm outline-none ring-indigo-200 transition focus:ring-2" placeholder="输出说明（可选）" />
+              <input value={skillDraft.outputDescription} onChange={(e) => setSkillDraft((prev) => ({ ...prev, outputDescription: e.target.value }))} className="h-10 rounded-xl border border-slate-200 px-3 text-sm outline-none ring-indigo-200 transition focus:ring-2" placeholder="输出说明（建议写给 LLM 看，例如：返回 manifest 路径、论文列表、PDF 本地路径）" />
             </div>
             <div className="flex items-center gap-2">
               <button type="button" onClick={() => void submitSkill()} disabled={creatingSkill} className="inline-flex h-10 items-center gap-2 rounded-xl bg-indigo-500 px-4 text-sm font-medium text-white transition hover:bg-indigo-600 disabled:opacity-60">
                 {creatingSkill ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                 {editingSkillId ? "保存技能资产" : "创建技能资产"}
               </button>
-              {editingSkillId ? <button type="button" onClick={() => { setEditingSkillId(null); setSkillDraft({ name: "", description: "", scriptId: "", parameterMapping: "{}", outputDescription: "" }); }} className="h-10 rounded-xl border border-slate-200 px-3 text-sm text-slate-600">取消编辑</button> : null}
+              {editingSkillId ? <button type="button" onClick={() => { setEditingSkillId(null); setSkillDraft({ name: "", description: "", guideContent: "", scriptId: "", parameterMapping: "{}", outputDescription: "" }); }} className="h-10 rounded-xl border border-slate-200 px-3 text-sm text-slate-600">取消编辑</button> : null}
             </div>
             <div className="space-y-2">
               {skills.map((skill) => {
@@ -1025,6 +1055,9 @@ export default function AssetsPage() {
                         </span>
                       </p>
                       <p className="text-xs text-slate-500">{skill.description || "暂无描述"}</p>
+                      <p className="mt-1 line-clamp-4 whitespace-pre-wrap text-[11px] text-slate-500">
+                        {skill.guideContent || "暂无技能说明"}
+                      </p>
                       <p className="mt-1 text-[11px] text-slate-400">
                         绑定脚本: <span className="text-indigo-500">{boundScript?.name ?? skill.scriptId}</span>
                         {skill.outputDescription ? ` · 输出: ${skill.outputDescription}` : ""}

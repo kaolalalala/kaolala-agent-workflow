@@ -83,7 +83,7 @@ const ROLE_TONE: Record<AgentNode["role"], { accentBar: string; sourceHandle: st
   },
 };
 
-export function AgentNodeCard({ id, data, dragging, selected }: NodeProps<AgentNodeData>) {
+export function AgentNodeCard({ id, data, dragging }: NodeProps<AgentNodeData>) {
   const setNodeSize = useWorkflowStore((state) => state.setNodeSize);
   const selectNode = useWorkflowStore((state) => state.selectNode);
   const updateNodeDetails = useWorkflowStore((state) => state.updateNodeDetails);
@@ -97,37 +97,33 @@ export function AgentNodeCard({ id, data, dragging, selected }: NodeProps<AgentN
   const [editingName, setEditingName] = useState(false);
   const [nameValue, setNameValue] = useState(data.node.name);
   const nameRef = useRef<HTMLInputElement>(null);
+  const displayedName = editingName ? nameValue : data.node.name;
 
   const commitName = useCallback(() => {
     setEditingName(false);
     const trimmed = nameValue.trim();
     if (trimmed && trimmed !== data.node.name) {
       updateNodeDetails(id, { name: trimmed });
-    } else {
-      setNameValue(data.node.name);
     }
   }, [nameValue, data.node.name, id, updateNodeDetails]);
 
   useEffect(() => { if (editingName) nameRef.current?.focus(); }, [editingName]);
-  useEffect(() => { if (!editingName) setNameValue(data.node.name); }, [data.node.name, editingName]);
 
   /* ── inline‑edit: task ── */
   const [editingTask, setEditingTask] = useState(false);
   const [taskValue, setTaskValue] = useState(data.node.taskSummary ?? "");
   const taskRef = useRef<HTMLTextAreaElement>(null);
+  const displayedTask = editingTask ? taskValue : (data.node.taskSummary ?? "");
 
   const commitTask = useCallback(() => {
     setEditingTask(false);
     const trimmed = taskValue.trim();
     if (trimmed !== (data.node.taskSummary ?? "")) {
       updateNodeDetails(id, { taskSummary: trimmed });
-    } else {
-      setTaskValue(data.node.taskSummary ?? "");
     }
   }, [taskValue, data.node.taskSummary, id, updateNodeDetails]);
 
   useEffect(() => { if (editingTask) taskRef.current?.focus(); }, [editingTask]);
-  useEffect(() => { if (!editingTask) setTaskValue(data.node.taskSummary ?? ""); }, [data.node.taskSummary, editingTask]);
 
   return (
     <Card
@@ -216,7 +212,7 @@ export function AgentNodeCard({ id, data, dragging, selected }: NodeProps<AgentN
             {editingName ? (
               <input
                 ref={nameRef}
-                value={nameValue}
+                value={displayedName}
                 onChange={(e) => setNameValue(e.target.value)}
                 onBlur={commitName}
                 onKeyDown={(e) => {
@@ -228,7 +224,7 @@ export function AgentNodeCard({ id, data, dragging, selected }: NodeProps<AgentN
             ) : (
               <CardTitle
                 className="mt-0.5 line-clamp-1 cursor-text text-sm leading-tight hover:text-emerald-600 dark:hover:text-emerald-400"
-                onClick={(e) => { e.stopPropagation(); setEditingName(true); }}
+                onClick={(e) => { e.stopPropagation(); setNameValue(data.node.name); setEditingName(true); }}
               >
                 {data.node.name}
               </CardTitle>
@@ -260,7 +256,7 @@ export function AgentNodeCard({ id, data, dragging, selected }: NodeProps<AgentN
         {editingTask ? (
           <textarea
             ref={taskRef}
-            value={taskValue}
+            value={displayedTask}
             onChange={(e) => setTaskValue(e.target.value)}
             onBlur={commitTask}
             onKeyDown={(e) => {
@@ -274,7 +270,7 @@ export function AgentNodeCard({ id, data, dragging, selected }: NodeProps<AgentN
         ) : (
           <div
             className="cursor-text rounded-xl border border-black/5 bg-white/70 px-2 py-1.5 transition-colors hover:border-emerald-300/60 dark:border-white/8 dark:bg-white/[0.04] dark:hover:border-emerald-500/40"
-            onClick={(e) => { e.stopPropagation(); setEditingTask(true); }}
+            onClick={(e) => { e.stopPropagation(); setTaskValue(data.node.taskSummary ?? ""); setEditingTask(true); }}
           >
             <p className="line-clamp-3 text-[11px] leading-4 text-slate-600 dark:text-slate-300">
               {data.node.taskSummary || <span className="italic text-slate-400">点击编辑任务…</span>}

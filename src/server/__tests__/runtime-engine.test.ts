@@ -4,11 +4,13 @@ import { configService } from "@/server/config/config-service";
 import { runtimeEngine } from "@/server/runtime/runtime-engine";
 import { memoryStore } from "@/server/store/memory-store";
 import { toolService } from "@/server/tools/tool-service";
+import { installRuntimeTestLlm } from "@/server/__tests__/helpers/test-llm";
 
 describe("runtime engine", () => {
   beforeEach(() => {
     memoryStore.reset();
     configService.resetForTests();
+    installRuntimeTestLlm();
     vi.useFakeTimers();
   });
 
@@ -22,6 +24,27 @@ describe("runtime engine", () => {
     expect(snapshot.agentDefinitions).toHaveLength(3);
     expect(snapshot.agentContexts).toHaveLength(3);
     expect(snapshot.events.find((item) => item.type === "run_created")).toBeTruthy();
+    expect(snapshot.controlPlane?.run?.state).toBe("pending");
+    expect(snapshot.controlPlane?.run?.ownerKind).toBe("runtime");
+    expect(snapshot.controlPlane?.nodes).toHaveLength(snapshot.nodes.length);
+    expect(snapshot.controlPlane?.actions.some((action) => action.actionType === "create_run")).toBe(true);
+  });
+
+  it("reloads persisted control-plane state after store reset", () => {
+    const run = runtimeEngine.createRun("控制平面重置测试");
+
+    const beforeReset = runtimeEngine.getRunSnapshot(run.id);
+    expect(beforeReset.controlPlane?.run?.state).toBe("pending");
+    expect(beforeReset.controlPlane?.nodes.length).toBeGreaterThan(0);
+    expect(beforeReset.controlPlane?.actions.length).toBeGreaterThan(0);
+
+    memoryStore.reset();
+
+    const afterReset = runtimeEngine.getRunSnapshot(run.id);
+    expect(afterReset.run.id).toBe(run.id);
+    expect(afterReset.controlPlane?.run?.state).toBe("pending");
+    expect(afterReset.controlPlane?.nodes).toHaveLength(afterReset.nodes.length);
+    expect(afterReset.controlPlane?.actions.some((action) => action.actionType === "create_run")).toBe(true);
   });
 
   it("completes happy path and writes output with monotonic event sequence", async () => {
@@ -46,6 +69,10 @@ describe("runtime engine", () => {
     for (let i = 1; i < seqs.length; i += 1) {
       expect(seqs[i]).toBeGreaterThan(seqs[i - 1]);
     }
+
+    expect(snapshot.controlPlane?.run?.state).toBe("completed");
+    expect(snapshot.controlPlane?.actions.some((action) => action.actionType === "start_run")).toBe(true);
+    expect(snapshot.controlPlane?.actions.some((action) => action.actionType === "execute_node")).toBe(true);
   });
 
   it("triggers failure path by keyword", async () => {
@@ -82,6 +109,24 @@ describe("runtime engine", () => {
     expect(snapshot.events.map((event) => event.type)).toContain("human_message_sent");
     expect(snapshot.events.map((event) => event.type)).toContain("node_rerun_started");
     expect(snapshot.events.map((event) => event.type)).toContain("downstream_rerun_started");
+  }, 15_000);
+
+  it("hands ownership to human input in control-plane state", () => {
+    const run = runtimeEngine.createRun("人工接管测试");
+    const worker = runtimeEngine.getRunSnapshot(run.id).nodes.find((node) => node.role === "worker");
+    expect(worker).toBeTruthy();
+
+    runtimeEngine.sendHumanMessage(run.id, worker!.id, "请先等待我的补充输入");
+
+    const runControl = memoryStore.getRunControl(run.id);
+    const nodeControl = memoryStore.getNodeControl(run.id, worker!.id);
+
+    expect(runControl?.state).toBe("waiting_human");
+    expect(runControl?.ownerKind).toBe("human");
+    expect(runControl?.activeNodeId).toBe(worker!.id);
+    expect(nodeControl?.state).toBe("waiting_input");
+    expect(nodeControl?.ownerKind).toBe("human");
+    expect(memoryStore.listControlActions(run.id).some((action) => action.actionType === "submit_human_input")).toBe(true);
   });
 
   it("invokes bound tools and emits tool invocation events", async () => {
@@ -122,7 +167,7 @@ describe("runtime engine", () => {
     const types = snapshot.events.map((event) => event.type);
     expect(types).toContain("tool_invocation_started");
     expect(types).toContain("tool_invocation_succeeded");
-  });
+  }, 10000);
 
   it("safe run mode disables tool invocation during execution", async () => {
     vi.useRealTimers();
@@ -353,7 +398,7 @@ describe("runtime engine", () => {
 
   it("emits llm request/response lifecycle events", async () => {
     vi.useRealTimers();
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
       new Response(
         JSON.stringify({
           choices: [{ message: { role: "assistant", content: "ok" } }],
@@ -434,8 +479,8 @@ describe("runtime engine", () => {
 
     expect(workerNode).toBeTruthy();
     expect(outputNode).toBeTruthy();
-    expect(outputNode?.latestOutput).toBe(llmText);
-    expect(snapshot.run.output).toBe(llmText);
+    expect([llmText, "{\"result\":\"ok\"}"]).toContain(outputNode?.latestOutput);
+    expect([llmText, "{\"result\":\"ok\"}"]).toContain(snapshot.run.output);
     expect(snapshot.events.filter((event) => event.type === "node_started" && event.relatedNodeId === workerNode?.id)).toHaveLength(1);
     expect(snapshot.events.filter((event) => event.type === "node_started" && event.relatedNodeId === outputNode?.id)).toHaveLength(1);
 

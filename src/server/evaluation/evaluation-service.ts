@@ -306,11 +306,6 @@ function waitForRunCompletion(runId: string) {
   return runtimeEngine.startRun(runId);
 }
 
-function normalizeArtifactList(runId: string) {
-  const root = join(outputManager.baseOutputRoot, runId);
-  return outputManager.collectOutputFiles(root).map((item) => outputManager.toProjectRelativePath(item));
-}
-
 function buildArtifactMaps(runId: string) {
   const root = join(outputManager.baseOutputRoot, runId);
   const files = outputManager.collectOutputFiles(root);

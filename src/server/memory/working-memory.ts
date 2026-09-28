@@ -118,7 +118,7 @@ export function assembleContext(options: AssembleOptions): AssembledContext {
     estimateTokens(briefSection) +
     estimateTokens(promptSection);
 
-  let remainingBudget = budget - requiredTokens;
+  const remainingBudget = budget - requiredTokens;
 
   // ── Allocate remaining budget across optional sections ──
   // Priority allocation: human messages > inbound > memory

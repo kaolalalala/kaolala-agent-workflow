@@ -132,7 +132,7 @@ export function decideOffload(input: OffloadingInput): OffloadingDecision {
 
   if (
     artifactKind === "research_notes" &&
-    (contentLength > options.inlineMaxChars || normalizedType.includes("search") || normalizedType.includes("paper"))
+    (contentLength > options.inlineMaxChars || normalizedType.includes("search"))
   ) {
     return {
       should_offload: true,

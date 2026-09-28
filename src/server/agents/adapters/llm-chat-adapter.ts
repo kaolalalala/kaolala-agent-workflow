@@ -112,8 +112,75 @@ function parseToolArguments(raw?: string): Record<string, unknown> {
   }
 }
 
+function parseToolDirective(content?: string) {
+  if (!content) {
+    return null;
+  }
+  const match = content.match(/^\/tool\s+([a-zA-Z0-9:_-]+)(?:\s+(.+))?$/);
+  if (!match) {
+    return null;
+  }
+
+  let parsedInput: Record<string, unknown> = {};
+  if (match[2]) {
+    try {
+      parsedInput = JSON.parse(match[2]) as Record<string, unknown>;
+    } catch {
+      parsedInput = { raw: match[2] };
+    }
+  }
+
+  return { toolId: match[1], input: parsedInput };
+}
+
+function buildAuthHeaders(provider: string | undefined, apiKey: string) {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  const normalizedProvider = (provider ?? "").trim().toLowerCase();
+  if (normalizedProvider === "anthropic") {
+    headers["x-api-key"] = apiKey;
+    headers["anthropic-version"] = "2023-06-01";
+    return headers;
+  }
+  headers.Authorization = `Bearer ${apiKey}`;
+  return headers;
+}
+
+function inferRouterCondition(text: string) {
+  const routingSource = text.toLowerCase();
+  if (routingSource.includes("reject") || routingSource.includes("拒绝")) {
+    return "reject";
+  }
+  if (routingSource.includes("approve") || routingSource.includes("通过")) {
+    return "approve";
+  }
+  if (routingSource.includes("research") || routingSource.includes("调研")) {
+    return "research";
+  }
+  if (routingSource.includes("summary") || routingSource.includes("总结")) {
+    return "summary";
+  }
+  return "default";
+}
+
 function summarizeRaw(text: string, limit = 320) {
   return text.replace(/\s+/g, " ").slice(0, limit);
+}
+
+function stripThinkBlocks(text: string): string {
+  if (!text) return "";
+  return text
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/^\s+|\s+$/g, "");
+}
+
+function looksLikeDraftOnly(text: string): boolean {
+  const normalized = (text || "").trim();
+  if (!normalized) return true;
+  const draftSignals = /(我将|我会|让我|先分析|接下来|稍后|I will|Let me|next I will)/i.test(normalized);
+  const deliverableSignals = /(方案|计划|步骤|结论|总结|交付|建议|风险|验收|##|###|1\.|2\.|3\.)/i.test(normalized);
+  return draftSignals && !deliverableSignals;
 }
 
 function excerpt(text: string, limit = 1200) {
@@ -220,7 +287,132 @@ async function* parseSSEStream(body: ReadableStream<Uint8Array>): AsyncGenerator
 export class LLMChatAdapter implements AgentAdapter {
   constructor(private readonly config: LLMConfig) {}
 
+  private async forceFinalize(
+    messages: ChatMessage[],
+    model: string,
+    timeoutMs: number,
+    requestPath: string,
+  ): Promise<string> {
+    const requestUrl = `${this.config.baseURL}${requestPath}`;
+    const finalizeMessages: ChatMessage[] = [
+      ...messages,
+      {
+        role: "user",
+        content:
+          "请不要再调用工具，不要描述你将要做什么。请基于已有信息直接给出最终完整答案（可执行、结构化、可交付）。",
+      },
+    ];
+    const body = {
+      model,
+      temperature: 0.2,
+      messages: finalizeMessages,
+      stream: false,
+    };
+    const res = await fetch(requestUrl, {
+      method: "POST",
+      headers: buildAuthHeaders(this.config.provider, this.config.apiKey),
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) {
+      return "";
+    }
+    const rawBody = await res.text().catch(() => "");
+    try {
+      const data = JSON.parse(rawBody) as ChatCompletionResponse;
+      const content = data.choices?.[0]?.message?.content ?? "";
+      return stripThinkBlocks(content).trim();
+    } catch {
+      return "";
+    }
+  }
+
+  private async recoverNonStreamCompletion(
+    requestUrl: string,
+    body: Record<string, unknown>,
+    timeoutMs: number,
+    round: number,
+  ): Promise<{ status: number; rawBody: string; data: ChatCompletionResponse }> {
+    const executeOnce = async () => {
+      const res = await fetch(requestUrl, {
+        method: "POST",
+        headers: buildAuthHeaders(this.config.provider, this.config.apiKey),
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const rawBody = await res.text().catch(() => "");
+      if (!res.ok) {
+        const snippet = summarizeRaw(rawBody, 240);
+        const err = new Error(`LLM request failed: ${res.status}${snippet ? ` - ${snippet}` : ""}`);
+        if (!isTransientHttpStatus(res.status)) {
+          throw Object.assign(err, { permanent: true });
+        }
+        throw err;
+      }
+      if (!rawBody.trim()) {
+        throw new Error("LLM response parse failed: empty body");
+      }
+      let data: ChatCompletionResponse;
+      try {
+        data = JSON.parse(rawBody) as ChatCompletionResponse;
+      } catch {
+        throw new Error(`LLM response parse failed: ${summarizeRaw(rawBody, 240) || "empty body"}`);
+      }
+      return { status: res.status, rawBody, data };
+    };
+
+    const retry = await withRetry(executeOnce, { maxRetries: 2, baseDelayMs: 1200 }, (attempt, error, delayMs) => {
+      console.warn("[LLM][parse-retry]", {
+        runId: this.config.runId,
+        nodeId: this.config.nodeId,
+        round,
+        attempt,
+        delayMs,
+        error: error.message.slice(0, 220),
+      });
+    });
+
+    if (!retry.ok) {
+      throw retry.error ?? new Error("LLM parse recovery failed");
+    }
+    return retry.value!;
+  }
+
   async run(input: AgentExecutionInput): Promise<AgentExecutionOutput> {
+    const latestHuman = input.context.humanMessages.at(-1)?.content?.trim() ?? "";
+    const structuredToolDirective = parseToolDirective(latestHuman) || parseToolDirective(input.resolvedInput);
+    if (structuredToolDirective) {
+      const toolResult = await input.invokeTool({
+        toolId: structuredToolDirective.toolId,
+        input: structuredToolDirective.input,
+      });
+      const finalText = toolResult.ok
+        ? JSON.stringify(toolResult.data ?? {})
+        : toolResult.error?.message ?? "Structured tool action failed.";
+      return {
+        latestOutput: finalText,
+        finalOutput: input.node.role === "summarizer" || input.node.role === "output" ? finalText : undefined,
+      };
+    }
+
+    if (input.node.role === "router") {
+      const inbound = input.context.inboundMessages.at(-1)?.content?.trim() ?? "";
+      const routerSource = [latestHuman, inbound, input.resolvedInput].filter(Boolean).join("\n");
+      const condition = inferRouterCondition(routerSource);
+      const forwarded = input.resolvedInput || inbound || latestHuman || "Router forwarded current context.";
+      return {
+        latestOutput: `Router selected branch: ${condition}`,
+        outboundMessages: [
+          {
+            toNodeId: "",
+            type: input.context.inboundMessages.at(-1)?.type ?? "task_assignment",
+            content: forwarded,
+          },
+        ],
+        condition,
+      };
+    }
+
     const prompt = buildPrompt(input);
     const tools = input.availableTools.map((tool, index) => ({
       tool,
@@ -233,7 +425,8 @@ export class LLMChatAdapter implements AgentAdapter {
       "You may call tools multiple times in sequence to complete complex tasks. " +
       "For latest/current/web/news/paper requests, call search/retrieval tools before answering. " +
       "If user asks to save to local path, call a save tool and include saved path in final answer. " +
-      "When you have gathered enough information, return your final answer directly without calling more tools.";
+      "When you have gathered enough information, return your final answer directly without calling more tools. " +
+      "Do not stop at analysis intent (e.g., 'I will analyze...'); output the final deliverable content.";
     const messages: ChatMessage[] = [
       {
         role: "system",
@@ -340,14 +533,11 @@ export class LLMChatAdapter implements AgentAdapter {
         };
       }
 
-      const timeoutMs = this.config.requestTimeoutMs ?? 60_000;
+      const timeoutMs = this.config.requestTimeoutMs ?? 90_000;
       const fetchFn = async (): Promise<Response> => {
         const res = await fetch(requestUrl, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${this.config.apiKey}`,
-          },
+          headers: buildAuthHeaders(this.config.provider, this.config.apiKey),
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(timeoutMs),
         });
@@ -365,7 +555,7 @@ export class LLMChatAdapter implements AgentAdapter {
         return res;
       };
 
-      const retryResult = await withRetry(fetchFn, { maxRetries: 2, baseDelayMs: 1500 }, (attempt, error, delayMs) => {
+      const retryResult = await withRetry(fetchFn, { maxRetries: 3, baseDelayMs: 1200 }, (attempt, error, delayMs) => {
         console.warn("[LLM][retry]", {
           runId: this.config.runId,
           nodeId: this.config.nodeId,
@@ -461,7 +651,7 @@ export class LLMChatAdapter implements AgentAdapter {
       }
 
       // ---------- Non-streaming path ----------
-      const rawBody = await response.text().catch(() => "");
+      let rawBody = await response.text().catch(() => "");
       console.info("[LLM][response]", {
         runId: this.config.runId,
         nodeId: this.config.nodeId,
@@ -478,12 +668,17 @@ export class LLMChatAdapter implements AgentAdapter {
       });
       let data: ChatCompletionResponse;
       try {
+        if (!rawBody.trim()) {
+          throw new Error("empty body");
+        }
         data = JSON.parse(rawBody) as ChatCompletionResponse;
       } catch {
-        throw new Error(`LLM response parse failed: ${summarizeRaw(rawBody, 240) || "empty body"}`);
+        const recovered = await this.recoverNonStreamCompletion(requestUrl, body as Record<string, unknown>, timeoutMs, round);
+        rawBody = recovered.rawBody;
+        data = recovered.data;
       }
       const assistantMessage = data.choices?.[0]?.message;
-      const assistantText = (assistantMessage?.content ?? "").trim();
+      const assistantText = stripThinkBlocks((assistantMessage?.content ?? "").trim());
       const tokenUsage = normalizeTokenUsage(data.usage);
       input.emitLifecycleEvent?.("llm_response_received", {
         provider: this.config.provider ?? "unknown",
@@ -617,7 +812,18 @@ export class LLMChatAdapter implements AgentAdapter {
     }
 
     // If we exhausted all rounds, return what we have
-    const exhaustedText = latestText || "LLM tool-call rounds exhausted.";
+    let exhaustedText = latestText || "LLM tool-call rounds exhausted.";
+    if (looksLikeDraftOnly(exhaustedText) || exhaustedText.includes("tool-call rounds exhausted")) {
+      const finalized = await this.forceFinalize(
+        messages,
+        input.definition.model ?? this.config.model,
+        this.config.requestTimeoutMs ?? 60_000,
+        "/chat/completions",
+      );
+      if (finalized) {
+        exhaustedText = finalized;
+      }
+    }
     if (hasStreamCallback) input.streamTokens?.(exhaustedText);
     return {
       latestOutput: exhaustedText,

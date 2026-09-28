@@ -9,7 +9,6 @@ import {
   FolderOpen,
   HardDrive,
   Loader2,
-  Play,
   PlayCircle,
   Plus,
   Terminal,

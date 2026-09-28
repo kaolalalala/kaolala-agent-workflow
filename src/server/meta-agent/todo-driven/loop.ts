@@ -642,6 +642,14 @@ export async function runTodoDrivenStep(
         source: "provider" | "estimated";
       };
     }>;
+    /**
+     * Human-in-the-Loop hook: called after the planner generates the initial
+     * todo list. If provided, execution pauses until the returned Promise
+     * resolves. The resolved string (user input) is logged but does not
+     * currently alter the plan — extend this to support plan modification.
+     * Returning an empty string means "proceed as-is" (timeout / skip).
+     */
+    onPlanReady?: (todos: import("../supervisor-runtime-state").TodoItem[]) => Promise<string>;
   },
 ): Promise<TodoStepResult> {
   const recoveryPolicy: RecoveryPolicyOptions = {
@@ -686,6 +694,21 @@ export async function runTodoDrivenStep(
       action: "plan_initial_todos",
       message: message({ generated_count: planned.length }),
     });
+
+    // Human-in-the-Loop: if caller registered an onPlanReady hook, pause here
+    // and wait for user confirmation before executing any todo.
+    if (options?.onPlanReady) {
+      const userInput = await options.onPlanReady(planned).catch(() => "");
+      if (userInput && userInput.trim()) {
+        addExecutionLog(state, {
+          timestamp: nowIso(),
+          todo_id: "planner",
+          actor: "human_in_loop",
+          action: "plan_confirmed",
+          message: JSON.stringify({ user_input: userInput.trim() }),
+        });
+      }
+    }
   }
 
   refreshTodoReadiness(state);

@@ -695,7 +695,6 @@ export const longTermMemoryService = {
     // embeddingService.embed is async, but results are cached.
     // We synchronously try to get from cache by calling embed and checking if it resolves immediately.
     // This is a pragmatic workaround — the first query won't have embeddings, subsequent ones will.
-    let result: number[] | null = null;
     const promise = embeddingService.embed(query);
     // If cached, the promise resolves in the same microtask — but we can't rely on that.
     // Instead, we use a sync approach: check if the embedding service has this in its cache.
@@ -708,7 +707,7 @@ export const longTermMemoryService = {
       if (emb) queryEmbeddingCache.set(query, emb);
     }).catch(() => {});
 
-    return result;
+    return null;
   },
 
   /** Get memory statistics for a scope */

@@ -486,7 +486,7 @@ export function DevWorkspaceShell({
     (path: string) => {
       setOpenTabs((prev) => prev.filter((t) => t.path !== path));
       if (activeTabPath === path) {
-        setActiveTabPath((prev) => {
+        setActiveTabPath(() => {
           const remaining = openTabs.filter((t) => t.path !== path);
           return remaining.length > 0 ? remaining[remaining.length - 1].path : null;
         });

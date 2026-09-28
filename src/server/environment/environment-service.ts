@@ -160,7 +160,7 @@ function scanCondaEnvironments(): LocalEnvironment[] {
       const parts = line.trim().split(/\s+/);
       // Last part is the path, first part is the name
       const envPath = parts[parts.length - 1];
-      let envName = parts[0];
+      const envName = parts[0];
       if (!envPath || !existsSync(envPath)) continue;
 
       // The active env has * in the middle

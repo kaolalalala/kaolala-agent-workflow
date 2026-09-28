@@ -16,6 +16,7 @@ import {
   Settings,
   Sparkles,
   Terminal,
+  Trophy,
   Workflow,
 } from "lucide-react";
 
@@ -43,6 +44,7 @@ const navItems = [
   { href: "/runs", label: "运行中心", icon: ActivitySquare },
   { href: "/evaluations", label: "评测", icon: ClipboardCheck },
   { href: "/meta-agent", label: "Meta-Agent", icon: Sparkles },
+  { href: "/showcases", label: "面试展示", icon: Trophy },
   { href: "/agent-dev", label: "开发台", icon: Terminal },
   { href: "/assets", label: "资产", icon: Boxes },
   { href: "/settings", label: "设置", icon: Settings },
@@ -51,6 +53,7 @@ const navItems = [
 function resolvePageTitle(pathname: string) {
   if (pathname.startsWith("/agent-dev")) return "开发台";
   if (pathname.startsWith("/evaluations")) return "评测";
+  if (pathname.startsWith("/showcases")) return "面试展示";
   if (pathname.startsWith("/projects/") && pathname.includes("/workflows/")) return "工作流编辑器";
   if (pathname.startsWith("/projects/")) return "项目详情";
   if (pathname.startsWith("/runs")) return "运行中心";

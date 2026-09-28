@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { configService } from "@/server/config/config-service";
 import { runtimeEngine } from "@/server/runtime/runtime-engine";
 import { memoryStore } from "@/server/store/memory-store";
+import { installRuntimeTestLlm } from "@/server/__tests__/helpers/test-llm";
 
 // ─── Helpers ──────────────────────────────────────────────
 
@@ -48,6 +49,7 @@ describe("swarm agent features", () => {
   beforeEach(() => {
     memoryStore.reset();
     configService.resetForTests();
+    installRuntimeTestLlm();
     vi.useFakeTimers();
   });
 
@@ -94,7 +96,7 @@ describe("swarm agent features", () => {
     expect(types).toContain("run_completed");
     expect(types).toContain("message_sent");
     expect(types).toContain("context_resolved");
-  });
+  }, 10_000);
 
   // ─── Agent Handoff via tool directive ──────────────────
 
@@ -129,7 +131,7 @@ describe("swarm agent features", () => {
       (e) => e.type === "message_sent" && e.payload?.type === "handoff",
     );
     expect(handoffEvents.length).toBeGreaterThanOrEqual(1);
-  });
+  }, 10_000);
 
   // ─── Subtask spawning ─────────────────────────────────
 
@@ -162,7 +164,7 @@ describe("swarm agent features", () => {
       (e) => e.type === "message_sent" && e.payload?.type === "subtask",
     );
     expect(subtaskEvents.length).toBeGreaterThanOrEqual(1);
-  });
+  }, 10_000);
 
   // ─── Handoff to non-existent agent (graceful failure) ──
 

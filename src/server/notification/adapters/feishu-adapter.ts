@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 
-import type { NotificationAdapter, NotificationPayload } from "../types";
+import type { NotificationAdapter } from "../types";
 import { buildMessage } from "./generic-webhook-adapter";
 
 export const feishuAdapter: NotificationAdapter = {

@@ -271,7 +271,7 @@ export const workspaceService = {
       if (entryPath.startsWith("__MACOSX/") || entryPath.includes("/.__")) continue;
 
       // Normalize: strip leading single root directory if all entries share one
-      let normalizedPath = entryPath;
+      const normalizedPath = entryPath;
       // Security: reject path traversal
       if (normalizedPath.includes("..") || normalizedPath.startsWith("/")) continue;
 

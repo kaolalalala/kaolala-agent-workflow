@@ -60,6 +60,7 @@ export function EvaluationsClient() {
         runtimeClient.listEvaluationSuites(),
         runtimeClient.listEvaluationRuns(50),
       ]);
+
       const suiteRows = await Promise.all(
         suitePayload.suites.map(async (suite) => {
           const casesPayload = await runtimeClient.listEvaluationCases(suite.id);
@@ -97,6 +98,11 @@ export function EvaluationsClient() {
     [suites],
   );
 
+  const totalCases = useMemo(
+    () => suites.reduce((sum, suite) => sum + suite.cases.length, 0),
+    [suites],
+  );
+
   const onCreateSuite = async () => {
     if (!suiteForm.name.trim()) {
       setError("评测套件名称不能为空");
@@ -127,7 +133,7 @@ export function EvaluationsClient() {
       return;
     }
     if (!caseForm.name.trim() || !caseForm.taskInput.trim()) {
-      setError("评测用例名称和输入不能为空");
+      setError("评测用例名称和任务输入不能为空");
       return;
     }
     setCreatingCase(true);
@@ -187,7 +193,7 @@ export function EvaluationsClient() {
       <div className="flex min-h-[320px] items-center justify-center rounded-xl border border-slate-200 bg-white">
         <div className="inline-flex items-center gap-2 text-sm text-slate-500">
           <Loader2 className="h-4 w-4 animate-spin" />
-          正在加载评测模块...
+          正在加载评测中心...
         </div>
       </div>
     );
@@ -196,12 +202,13 @@ export function EvaluationsClient() {
   return (
     <div className="space-y-6">
       <section className="rounded-xl border border-slate-200/80 bg-gradient-to-b from-white to-slate-50/60 px-6 py-5 shadow-[0_16px_32px_-24px_rgba(15,23,42,0.32),0_10px_18px_-16px_rgba(15,23,42,0.18)]">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <p className="text-xs font-medium text-slate-500">Evaluations / 评测闭环</p>
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="max-w-3xl">
+            <p className="text-xs font-medium text-slate-500">Evaluations / 评测中心</p>
             <h1 className="mt-2 text-xl font-semibold text-slate-900">回放、对比、评分与回归验证</h1>
-            <p className="mt-1 text-sm text-slate-500">
-              基于 run_snapshot、Prompt Trace、Tool Trace 和统一输出目录构建结构化评测闭环。
+            <p className="mt-1 text-sm leading-6 text-slate-500">
+              这里承接平台的质量闭环。你可以先创建套件和用例，再用真实运行结果生成
+              baseline / replay / compare 报告，验证修改是否真的有效。
             </p>
           </div>
           <button
@@ -213,6 +220,13 @@ export function EvaluationsClient() {
             刷新
           </button>
         </div>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-3">
+          <MetricCard title="工作流" value={String(workflows.length)} />
+          <MetricCard title="评测套件" value={String(suites.length)} />
+          <MetricCard title="评测用例" value={String(totalCases)} />
+        </div>
+
         {message ? <p className="mt-3 text-sm text-emerald-600">{message}</p> : null}
         {error ? <p className="mt-3 text-sm text-rose-600">{error}</p> : null}
       </section>
@@ -220,17 +234,20 @@ export function EvaluationsClient() {
       <section className="grid gap-4 xl:grid-cols-2">
         <article className="rounded-xl border border-slate-200 bg-white p-5">
           <h2 className="text-sm font-semibold text-slate-900">创建评测套件</h2>
+          <p className="mt-1 text-xs leading-5 text-slate-500">
+            套件通常对应一个回归主题，比如“技能调用稳定性”或“Meta-Agent 并行任务验证”。
+          </p>
           <div className="mt-3 space-y-3">
             <input
               value={suiteForm.name}
               onChange={(event) => setSuiteForm((prev) => ({ ...prev, name: event.target.value }))}
-              placeholder="例如：Swarm Regression Suite"
+              placeholder="例如：Meta-Agent 回归套件"
               className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-400"
             />
             <textarea
               value={suiteForm.description}
               onChange={(event) => setSuiteForm((prev) => ({ ...prev, description: event.target.value }))}
-              placeholder="说明这组评测关注的回归场景"
+              placeholder="说明这组评测主要验证什么问题"
               rows={3}
               className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-400"
             />
@@ -260,6 +277,9 @@ export function EvaluationsClient() {
 
         <article className="rounded-xl border border-slate-200 bg-white p-5">
           <h2 className="text-sm font-semibold text-slate-900">创建评测用例</h2>
+          <p className="mt-1 text-xs leading-5 text-slate-500">
+            用例保存实际任务输入，以及对输出的关键断言，方便后续自动回放和对比。
+          </p>
           <div className="mt-3 space-y-3">
             <select
               value={caseForm.suiteId}
@@ -276,7 +296,7 @@ export function EvaluationsClient() {
             <input
               value={caseForm.name}
               onChange={(event) => setCaseForm((prev) => ({ ...prev, name: event.target.value }))}
-              placeholder="例如：角色协作稳定性回归"
+              placeholder="例如：并行下载论文 20 篇"
               className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-400"
             />
             <textarea
@@ -326,7 +346,9 @@ export function EvaluationsClient() {
                       {suite.description ? <p className="mt-1 text-xs text-slate-500">{suite.description}</p> : null}
                       <p className="mt-1 text-xs text-slate-400">
                         绑定工作流：
-                        {suite.workflowId ? workflows.find((item) => item.id === suite.workflowId)?.name ?? suite.workflowId : "未绑定"}
+                        {suite.workflowId
+                          ? workflows.find((item) => item.id === suite.workflowId)?.name ?? suite.workflowId
+                          : "未绑定"}
                       </p>
                     </div>
                     <span className="rounded-full bg-white px-2.5 py-1 text-xs text-slate-500">
@@ -403,7 +425,7 @@ export function EvaluationsClient() {
         <h2 className="text-sm font-semibold text-slate-900">评测报告</h2>
         {!selectedReport ? (
           <div className="mt-3">
-            <EmptyState text="选择一条评测运行，或者先执行一个用例，这里会显示基线、回放和对比报告。" />
+            <EmptyState text="选择一条评测运行，或者先执行一个用例。这里会显示 baseline、replay 和 compare 报告。" />
           </div>
         ) : (
           <div className="mt-4 space-y-4">
@@ -415,8 +437,18 @@ export function EvaluationsClient() {
             </div>
 
             <div className="grid gap-4 lg:grid-cols-2">
-              <RunContextCard title="Baseline 上下文" runStatus={selectedReport.baseline.status} taskInput={selectedReport.baseline.taskInput} memoryIsolationMode={selectedReport.baseline.memoryIsolationMode} />
-              <RunContextCard title="Replay 上下文" runStatus={selectedReport.replay.status} taskInput={selectedReport.replay.taskInput} memoryIsolationMode={selectedReport.replay.memoryIsolationMode} />
+              <RunContextCard
+                title="Baseline 上下文"
+                runStatus={selectedReport.baseline.status}
+                taskInput={selectedReport.baseline.taskInput}
+                memoryIsolationMode={selectedReport.baseline.memoryIsolationMode}
+              />
+              <RunContextCard
+                title="Replay 上下文"
+                runStatus={selectedReport.replay.status}
+                taskInput={selectedReport.replay.taskInput}
+                memoryIsolationMode={selectedReport.replay.memoryIsolationMode}
+              />
             </div>
 
             <div className="grid gap-4 lg:grid-cols-2">

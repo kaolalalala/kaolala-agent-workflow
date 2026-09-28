@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { LLMChatAdapter } from "@/server/agents/adapters/llm-chat-adapter";
-import { MockAgentAdapter } from "@/server/agents/adapters/mock-agent-adapter";
 import { buildPrompt } from "@/server/agents/builder/prompt-builder";
 import type { AgentExecutionInput } from "@/server/agents/types";
 import type { ResolvedTool } from "@/server/tools/contracts";
@@ -75,7 +74,7 @@ function buildWorkerInput(humanMessage?: string): AgentExecutionInput {
         code: "TOOL_NOT_AVAILABLE",
         message: "no tool",
         retriable: false,
-        source: "platform",
+        source: "platform" as const,
       },
     }),
   };
@@ -86,16 +85,6 @@ describe("agent adapter", () => {
     vi.restoreAllMocks();
   });
 
-  it("mock worker output changes when human message exists", async () => {
-    const adapter = new MockAgentAdapter();
-
-    const withoutHuman = await adapter.run(buildWorkerInput());
-    const withHuman = await adapter.run(buildWorkerInput("Please add concrete examples."));
-
-    expect(withoutHuman.outboundMessages?.[0]?.content).not.toBe(withHuman.outboundMessages?.[0]?.content);
-    expect(withHuman.outboundMessages?.[0]?.content).toContain("Human override");
-  });
-
   it("prompt builder includes human and inbound messages", () => {
     const built = buildPrompt(buildWorkerInput("Focus on Dynamic Agent Creation"));
 
@@ -104,6 +93,40 @@ describe("agent adapter", () => {
     expect(built.user).toContain("上游消息");
     expect(built.user).toContain("人工消息");
     expect(built.user).toContain("Dynamic Agent Creation");
+  });
+
+  it("llm adapter sends human context through the real prompt path", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: "Completed with human override.",
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const adapter = new LLMChatAdapter({
+      provider: "openai",
+      baseURL: "https://example.com/v1",
+      apiKey: "test-key",
+      model: "gpt-4o-mini",
+    });
+
+    const result = await adapter.run(buildWorkerInput("Please add concrete examples."));
+
+    expect(result.latestOutput).toContain("Completed");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const serializedMessages = JSON.stringify(requestBody.messages);
+    expect(serializedMessages).toContain("Please add concrete examples.");
+    expect(serializedMessages).toContain("Please compare approaches.");
   });
 
   it("llm adapter auto-calls tool and continues completion", async () => {
@@ -154,7 +177,7 @@ describe("agent adapter", () => {
       ok: true,
       durationMs: 12,
       data: { weather: "sunny" },
-      meta: { provider: "mock" },
+      meta: { provider: "live-llm" },
     });
 
     const availableTools: ResolvedTool[] = [
@@ -191,6 +214,7 @@ describe("agent adapter", () => {
     ];
 
     const adapter = new LLMChatAdapter({
+      provider: "openai",
       baseURL: "https://example.com/v1",
       apiKey: "test-key",
       model: "gpt-4o-mini",

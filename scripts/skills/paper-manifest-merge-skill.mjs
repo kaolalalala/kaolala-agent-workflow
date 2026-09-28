@@ -166,15 +166,22 @@ function main() {
   const targetOutputDir = outputLabel
     ? join(rootOutputDir, sanitizeSegment(outputLabel))
     : rootOutputDir;
-  mkdirSync(targetOutputDir, { recursive: true });
+  mkdirSync(rootOutputDir, { recursive: true });
+  if (targetOutputDir !== rootOutputDir) {
+    mkdirSync(targetOutputDir, { recursive: true });
+  }
 
   const allSourceManifestPaths = [...allManifestPaths];
   const selectedPapers = requiredCount > 0 ? deduped.slice(0, requiredCount) : deduped;
 
-  const mergedManifestPath = join(targetOutputDir, "merged_paper_manifest.json");
-  const mergedManifestAliasPath = join(targetOutputDir, "manifest_final.json");
-  const reportPath = join(targetOutputDir, "merged_paper_manifest.md");
-  const reportAliasPath = join(targetOutputDir, "manifest_final.md");
+  const mergedManifestPath = join(rootOutputDir, "merged_paper_manifest.json");
+  const mergedManifestAliasPath = join(rootOutputDir, "manifest_final.json");
+  const reportPath = join(rootOutputDir, "merged_paper_manifest.md");
+  const reportAliasPath = join(rootOutputDir, "manifest_final.md");
+  const labeledManifestPath = join(targetOutputDir, "merged_paper_manifest.json");
+  const labeledManifestAliasPath = join(targetOutputDir, "manifest_final.json");
+  const labeledReportPath = join(targetOutputDir, "merged_paper_manifest.md");
+  const labeledReportAliasPath = join(targetOutputDir, "manifest_final.md");
   const mergedOutput = {
     ok: true,
     skill: "paper_manifest_merge_skill",
@@ -183,6 +190,10 @@ function main() {
     manifestFinalPath: mergedManifestAliasPath,
     reportPath,
     reportFinalPath: reportAliasPath,
+    labeledManifestPath,
+    labeledManifestFinalPath: labeledManifestAliasPath,
+    labeledReportPath,
+    labeledReportFinalPath: labeledReportAliasPath,
     sourceManifestPaths: allSourceManifestPaths,
     sourceManifestCount: allSourceManifestPaths.length,
     sourcePaperCount,
@@ -198,6 +209,12 @@ function main() {
   writeFileSync(mergedManifestAliasPath, `${JSON.stringify(mergedOutput, null, 2)}\n`, "utf8");
   writeFileSync(reportPath, `${buildMarkdownReport(mergedOutput)}\n`, "utf8");
   writeFileSync(reportAliasPath, `${buildMarkdownReport(mergedOutput)}\n`, "utf8");
+  if (targetOutputDir !== rootOutputDir) {
+    writeFileSync(labeledManifestPath, `${JSON.stringify(mergedOutput, null, 2)}\n`, "utf8");
+    writeFileSync(labeledManifestAliasPath, `${JSON.stringify(mergedOutput, null, 2)}\n`, "utf8");
+    writeFileSync(labeledReportPath, `${buildMarkdownReport(mergedOutput)}\n`, "utf8");
+    writeFileSync(labeledReportAliasPath, `${buildMarkdownReport(mergedOutput)}\n`, "utf8");
+  }
   process.stdout.write(JSON.stringify(mergedOutput));
 }
 

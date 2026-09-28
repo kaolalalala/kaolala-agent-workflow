@@ -203,8 +203,8 @@ export function validateAndNormalizeTodoDrafts(
   raw: unknown,
   options?: TodoDraftValidationOptions,
 ): TodoDraftValidationResult {
-  const minCount = Math.max(1, options?.minCount ?? 3);
-  const maxCount = Math.max(minCount, options?.maxCount ?? 5);
+  const minCount = Math.max(1, options?.minCount ?? 1);
+  const maxCount = Math.max(minCount, options?.maxCount ?? 20);
   if (!Array.isArray(raw)) {
     return {
       ok: false,

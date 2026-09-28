@@ -27,6 +27,12 @@
 .output/
 .cache/
 
+# local runtime artifacts
+/.tmp/
+/tmp/
+/inupt/
+/session_state_debug.json
+
 # debug
 npm-debug.log*
 yarn-debug.log*

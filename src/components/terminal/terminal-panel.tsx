@@ -71,7 +71,7 @@ export function TerminalPanel({ workspaceId, className }: TerminalPanelProps) {
 
       // Start polling for output
       pollingRef.current = setInterval(poll, 100);
-    } catch (err) {
+    } catch {
       terminalRef.current?.write(`\r\n[错误] 启动终端失败\r\n`);
     }
   }, [workspaceId, poll]);

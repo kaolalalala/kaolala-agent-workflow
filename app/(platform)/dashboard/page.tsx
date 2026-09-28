@@ -1,6 +1,12 @@
 import Link from "next/link";
 import { type ReactNode } from "react";
-import { Activity, FileText, FolderKanban, PlayCircle, Workflow } from "lucide-react";
+import {
+  Activity,
+  FileText,
+  FolderKanban,
+  PlayCircle,
+  Workflow,
+} from "lucide-react";
 
 import { runService } from "@/server/api/run-service";
 

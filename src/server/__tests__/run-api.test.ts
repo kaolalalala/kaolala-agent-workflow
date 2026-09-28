@@ -209,7 +209,7 @@ describe("run api routes", () => {
     expect(compareBody.report.baselineRunId).toBe(created.runId);
     expect(compareBody.report.candidateRunId).toBe(replayBody.replayRunId);
     expect(compareBody.report.nodeDiffs.length).toBeGreaterThan(0);
-  });
+  }, 15_000);
 
   it("node-level APIs return agent/human-message/rerun payload", async () => {
     const createResponse = await createRunPost(

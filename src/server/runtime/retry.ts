@@ -57,6 +57,10 @@ export function isTransientError(error: unknown): boolean {
   if (error && typeof error === "object" && "permanent" in error && (error as Record<string, unknown>).permanent === true) {
     return false;
   }
+  // Explicitly marked transient errors should always be retried.
+  if (error && typeof error === "object" && "transient" in error && (error as Record<string, unknown>).transient === true) {
+    return true;
+  }
   if (error instanceof Error) {
     const msg = error.message.toLowerCase();
     // Timeout errors
@@ -67,6 +71,10 @@ export function isTransientError(error: unknown): boolean {
     if (msg.includes("econnreset") || msg.includes("econnrefused") || msg.includes("enotfound")
         || msg.includes("fetch failed") || msg.includes("network")
         || msg.includes("socket hang up") || msg.includes("epipe")) {
+      return true;
+    }
+    // Some providers intermittently return HTTP 200 with an empty or malformed body.
+    if (msg.includes("empty body") || msg.includes("response content is empty")) {
       return true;
     }
     // Rate limiting

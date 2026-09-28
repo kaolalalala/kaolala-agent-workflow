@@ -39,7 +39,7 @@ describe("meta-agent resource-center tool exposure", () => {
   });
 
   it("exposes enabled resource-center skills as callable tools for subagents", () => {
-    vi.spyOn(skillCenter, "listMetaAgentSkillResources").mockReturnValue([
+    vi.spyOn(skillCenter, "selectMetaAgentSkillResources").mockReturnValue([
       {
         id: "skill_agent_rl_pack",
         name: "Agent RL Pack",

@@ -6,6 +6,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Archive, ArchiveRestore, ArrowLeft, ChevronDown, ChevronUp, FileUp, Loader2, Pencil, Save, Trash2, Upload } from "lucide-react";
 
 import {
+  getMetaAgentDisplayStatus,
+  metaAgentClient,
+  type MetaAgentSessionSummaryView,
+} from "@/features/meta-agent/adapters/meta-agent-client";
+import {
   runtimeClient,
   type AgentTemplateView,
   type CredentialSummary,
@@ -47,6 +52,7 @@ export function ProjectDetailClient({ projectId }: { projectId: string }) {
   const [project, setProject] = useState<ProjectSummaryView | null>(null);
   const [workflows, setWorkflows] = useState<WorkflowSummaryView[]>([]);
   const [runs, setRuns] = useState<RunRecordView[]>([]);
+  const [metaAgentSessions, setMetaAgentSessions] = useState<MetaAgentSessionSummaryView[]>([]);
   const [files, setFiles] = useState<ProjectFileView[]>([]);
   const [workflowTemplates, setWorkflowTemplates] = useState<WorkflowTemplateView[]>([]);
   const [agentTemplates, setAgentTemplates] = useState<AgentTemplateView[]>([]);
@@ -106,16 +112,18 @@ export function ProjectDetailClient({ projectId }: { projectId: string }) {
     setLoading(true);
     setError("");
     try {
-      const [projectPayload, workflowPayload, runPayload, filePayload, credentialPayload] = await Promise.all([
+      const [projectPayload, workflowPayload, runPayload, metaAgentPayload, filePayload, credentialPayload] = await Promise.all([
         runtimeClient.getProject(projectId),
         runtimeClient.listProjectWorkflows(projectId),
         runtimeClient.listProjectRuns(projectId, 40),
+        metaAgentClient.listSessions({ projectId, limit: 20 }).catch(() => ({ sessions: [] })),
         runtimeClient.listProjectFiles(projectId, 120),
         runtimeClient.listCredentials().catch(() => ({ credentials: [] })),
       ]);
       setProject(projectPayload.project);
       setWorkflows(workflowPayload.workflows);
       setRuns(runPayload.runs);
+      setMetaAgentSessions(metaAgentPayload.sessions);
       setFiles(filePayload.files);
       setCredentials(uniqueCredentials(credentialPayload.credentials));
       hydrateSettings(projectPayload.project);
@@ -356,11 +364,12 @@ export function ProjectDetailClient({ projectId }: { projectId: string }) {
         {message ? <p className="mb-2 text-xs text-emerald-600">{message}</p> : null}
 
         {activeTab === "overview" ? (
-          <OverviewTab
+          <ProjectOverviewTab
             projectId={projectId}
             project={project}
             workflows={workflows}
             runs={runs}
+            metaAgentSessions={metaAgentSessions}
             files={files}
             recentFailedRun={recentFailedRun}
           />
@@ -508,11 +517,13 @@ export function ProjectDetailClient({ projectId }: { projectId: string }) {
   );
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function OverviewTab({
   projectId,
   project,
   workflows,
   runs,
+  metaAgentSessions,
   files,
   recentFailedRun,
 }: {
@@ -520,11 +531,14 @@ function OverviewTab({
   project: ProjectSummaryView | null;
   workflows: WorkflowSummaryView[];
   runs: RunRecordView[];
+  metaAgentSessions: MetaAgentSessionSummaryView[];
   files: ProjectFileView[];
   recentFailedRun: RunRecordView | undefined;
 }) {
   const recentWorkflows = workflows.slice(0, 5);
   const recentRuns = runs.slice(0, 5);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const recentMetaAgentSessions = metaAgentSessions.slice(0, 5);
   const recentFiles = files.slice(0, 5);
 
   return (
@@ -613,6 +627,167 @@ function OverviewTab({
   );
 }
 
+function ProjectOverviewTab({
+  projectId,
+  project,
+  workflows,
+  runs,
+  metaAgentSessions,
+  files,
+  recentFailedRun,
+}: {
+  projectId: string;
+  project: ProjectSummaryView | null;
+  workflows: WorkflowSummaryView[];
+  runs: RunRecordView[];
+  metaAgentSessions: MetaAgentSessionSummaryView[];
+  files: ProjectFileView[];
+  recentFailedRun: RunRecordView | undefined;
+}) {
+  const recentWorkflows = workflows.slice(0, 5);
+  const recentRuns = runs.slice(0, 5);
+  const recentMetaAgentSessions = metaAgentSessions.slice(0, 5);
+  const recentFiles = files.slice(0, 5);
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+        <OverviewCard title="工作流数" value={String(project?.workflowCount ?? workflows.length)} />
+        <OverviewCard title="运行次数" value={String(project?.runCount ?? runs.length)} />
+        <OverviewCard title="文件数量" value={String(project?.fileCount ?? files.length)} />
+        <OverviewCard title="Meta-Agent 会话数" value={String(metaAgentSessions.length)} />
+        <OverviewCard
+          title="最近失败运行"
+          value={
+            recentFailedRun
+              ? `${recentFailedRun.workflowName} · ${new Date(recentFailedRun.updatedAt).toLocaleString()}`
+              : "暂无失败"
+          }
+        />
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+          <p className="mb-2 text-xs font-medium text-slate-500">最近工作流</p>
+          {recentWorkflows.length === 0 ? (
+            <p className="text-sm text-slate-400">暂无工作流</p>
+          ) : (
+            <div className="space-y-2">
+              {recentWorkflows.map((workflow) => (
+                <Link
+                  key={workflow.id}
+                  href={`/projects/${projectId}/workflows/${workflow.id}`}
+                  className="block rounded-lg border border-slate-200 bg-white px-3 py-2 transition hover:border-indigo-200 hover:bg-indigo-50/40"
+                >
+                  <p className="text-sm font-medium text-slate-800">{workflow.name}</p>
+                  <p className="text-xs text-slate-500">更新于 {new Date(workflow.updatedAt).toLocaleString()}</p>
+                </Link>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+          <p className="mb-2 text-xs font-medium text-slate-500">最近运行</p>
+          {recentRuns.length === 0 ? (
+            <p className="text-sm text-slate-400">暂无运行记录</p>
+          ) : (
+            <div className="space-y-2">
+              {recentRuns.map((run) => (
+                <Link
+                  key={run.id}
+                  href={`/projects/${projectId}/runs/${run.id}`}
+                  className="block rounded-lg border border-slate-200 bg-white px-3 py-2 transition hover:border-indigo-200 hover:bg-indigo-50/40"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="truncate text-sm font-medium text-slate-800">{run.workflowName}</p>
+                    <StatusPill status={run.status} />
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    {new Date(run.updatedAt).toLocaleString()}
+                    {run.durationMs != null ? ` · ${formatDuration(run.durationMs)}` : ""}
+                  </p>
+                </Link>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <p className="text-xs font-medium text-slate-500">Meta-Agent 活动</p>
+            <div className="flex items-center gap-2">
+              <Link
+                href={`/runs?scope=meta_agent_run&projectId=${encodeURIComponent(projectId)}`}
+                className="text-[11px] font-medium text-slate-600 hover:text-slate-800"
+              >
+                运行中心
+              </Link>
+              <Link
+                href={`/meta-agent?projectId=${encodeURIComponent(projectId)}`}
+                className="text-[11px] font-medium text-indigo-600 hover:text-indigo-700"
+              >
+                项目视图
+              </Link>
+            </div>
+          </div>
+          {recentMetaAgentSessions.length === 0 ? (
+            <p className="text-sm text-slate-400">该项目暂无 Meta-Agent 会话</p>
+          ) : (
+            <div className="space-y-2">
+              {recentMetaAgentSessions.map((session) => (
+                <Link
+                  key={session.sessionId}
+                  href={`/meta-agent?sessionId=${encodeURIComponent(session.sessionId)}`}
+                  className="block rounded-lg border border-slate-200 bg-white px-3 py-2 transition hover:border-indigo-200 hover:bg-indigo-50/40"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="line-clamp-2 text-sm font-medium text-slate-800">{session.goal}</p>
+                    <MetaAgentStatusPill session={session} />
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {session.currentPhase ? session.currentPhase : "排队中"}
+                    {typeof session.currentStep === "number" ? ` · 步骤 ${session.currentStep}` : ""}
+                    {session.todoCount > 0 ? ` · Todo ${session.doneTodoCount}/${session.todoCount}` : ""}
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    {session.durationMs != null ? `${formatDuration(session.durationMs)} · ` : ""}
+                    {session.totalTokens > 0 ? `${session.totalTokens.toLocaleString()} tokens · ` : ""}
+                    {new Date(session.lastUpdatedAt ?? session.startedAt).toLocaleString()}
+                  </p>
+                </Link>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+          <p className="mb-2 text-xs font-medium text-slate-500">最近文件</p>
+          {recentFiles.length === 0 ? (
+            <p className="text-sm text-slate-400">暂无文件</p>
+          ) : (
+            <div className="space-y-2">
+              {recentFiles.map((file) => (
+                <Link
+                  key={file.id}
+                  href={`/projects/${projectId}/files/${file.id}`}
+                  className="block rounded-lg border border-slate-200 bg-white px-3 py-2 transition hover:border-indigo-200 hover:bg-indigo-50/40"
+                >
+                  <p className="text-sm font-medium text-slate-800">{file.name}</p>
+                  <p className="text-xs text-slate-500">
+                    来源：{buildFileSource(file)}
+                    {file.size != null ? ` · ${formatFileSize(file.size)}` : ""}
+                  </p>
+                </Link>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function uniqueCredentials(items: CredentialSummary[]) {
   const map = new Map<string, CredentialSummary>();
   for (const item of items) {
@@ -667,6 +842,17 @@ function StatusPill({ status }: { status: RunRecordView["status"] }) {
     return <span className="rounded-full bg-green-100 px-2.5 py-1 text-xs font-semibold text-green-700">成功</span>;
   }
   if (status === "failed") {
+    return <span className="rounded-full bg-rose-100 px-2.5 py-1 text-xs font-semibold text-rose-700">失败</span>;
+  }
+  return <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-700">运行中</span>;
+}
+
+function MetaAgentStatusPill({ session }: { session: MetaAgentSessionSummaryView }) {
+  const displayStatus = getMetaAgentDisplayStatus(session);
+  if (displayStatus === "success") {
+    return <span className="rounded-full bg-green-100 px-2.5 py-1 text-xs font-semibold text-green-700">成功</span>;
+  }
+  if (displayStatus === "failed") {
     return <span className="rounded-full bg-rose-100 px-2.5 py-1 text-xs font-semibold text-rose-700">失败</span>;
   }
   return <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-700">运行中</span>;

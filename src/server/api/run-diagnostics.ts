@@ -1,4 +1,5 @@
 import { configService } from "@/server/config/config-service";
+import { resolveStrictWorkspaceLLMConfig } from "@/server/config/strict-llm-config";
 import { Event, EventType } from "@/server/domain";
 import { RunSnapshot } from "@/server/store/memory-store";
 
@@ -261,14 +262,21 @@ function buildChecks(snapshot: RunSnapshot, nodeDiagnostics: NodeDiagnostic[]) {
   });
 
   const workspace = configService.ensureWorkspaceConfig();
-  const provider = (workspace.defaultProvider ?? "mock").toLowerCase();
+  const provider = (workspace.defaultProvider ?? "").toLowerCase();
   const hasBaseUrl = Boolean((workspace.defaultBaseUrl ?? "").trim());
   const hasModel = Boolean((workspace.defaultModel ?? "").trim());
   const hasApiKey = Boolean(configService.resolveCredentialApiKey(workspace.defaultCredentialId)?.trim());
-  const configReady = provider === "mock" || (hasBaseUrl && hasModel && hasApiKey);
+  const configReady = (() => {
+    try {
+      resolveStrictWorkspaceLLMConfig();
+      return true;
+    } catch {
+      return false;
+    }
+  })();
   checks.push({
     id: "workspace_llm_config_ready",
-    severity: provider === "mock" ? "info" : "error",
+    severity: "error",
     pass: configReady,
     message: configReady ? "工作区 LLM 配置可用" : "工作区 LLM 配置不完整（baseURL/model/key）",
     details: {
@@ -334,8 +342,8 @@ export function buildRunDiagnosticsReport(snapshot: RunSnapshot) {
           recentOutputCount: context?.recentOutputs.length ?? 0,
         },
         execution: {
-          provider: definition?.provider ?? "mock",
-          model: definition?.model ?? "mock-agent-v1",
+          provider: definition?.provider ?? "unconfigured",
+          model: definition?.model ?? "unconfigured",
           startedAt,
           completedAt,
           failedAt,
@@ -423,8 +431,8 @@ export function buildRunDiagnosticsReport(snapshot: RunSnapshot) {
     workspace: {
       id: workspace.id,
       name: workspace.name,
-      defaultProvider: workspace.defaultProvider ?? "mock",
-      defaultModel: workspace.defaultModel ?? "mock-agent-v1",
+      defaultProvider: workspace.defaultProvider ?? "",
+      defaultModel: workspace.defaultModel ?? "",
       defaultBaseUrl: workspace.defaultBaseUrl ?? "",
       defaultCredentialId: workspace.defaultCredentialId ?? "",
       hasCredentialApiKey: Boolean(workspaceApiKey?.trim()),

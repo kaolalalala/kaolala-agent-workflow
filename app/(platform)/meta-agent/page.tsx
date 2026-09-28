@@ -372,6 +372,13 @@ interface MetaAgentSession {
     preservedArtifactCount: number;
     incompleteTodoIds: string[];
   }>;
+  pendingInput?: {
+    awaiting: boolean;
+    prompt: string;
+    requestedAt: string;
+    timeoutAt: string;
+    inputToken?: string;
+  };
   memoryWritebackSummary?: {
     projectId: string;
     runSummaryCount: number;
@@ -420,8 +427,102 @@ interface SessionListItem {
   lastUpdatedAt?: string;
 }
 
+type MetaAgentStreamConnectionState =
+  | "idle"
+  | "connecting"
+  | "streaming"
+  | "reconnecting"
+  | "closed"
+  | "error";
+
+interface MetaAgentLogLineEvent {
+  type: "log_line";
+  sessionId: string;
+  seq: number;
+  timestamp: string;
+  todo_id: string;
+  actor: string;
+  action: string;
+  message: string;
+}
+
+interface MetaAgentStepProgressEvent {
+  type: "step_progress";
+  sessionId: string;
+  seq: number;
+  step: number;
+  phase: string;
+  reflectionScore?: number;
+  reflectionVerdict?: string;
+  todoSummary: Array<{
+    id: string;
+    title: string;
+    status: string;
+    retry_count: number;
+  }>;
+  totalTokens: number;
+  llmCallCount: number;
+}
+
+interface MetaAgentSessionStateEvent {
+  type: "session_state";
+  sessionId: string;
+  seq: number;
+  status: "running" | "done" | "failed" | "awaiting_input";
+  inputPrompt?: string;
+  inputToken?: string;
+}
+
+type MetaAgentSessionEvent =
+  | MetaAgentLogLineEvent
+  | MetaAgentStepProgressEvent
+  | MetaAgentSessionStateEvent;
+
+interface MetaAgentStreamRecord {
+  receivedAt: string;
+  event: MetaAgentSessionEvent;
+}
+
+interface PendingHumanInputState {
+  prompt: string;
+  token: string;
+  requestedAt: string;
+}
+
 const sectionCard =
   "rounded-3xl border border-black/[0.06] bg-white/80 shadow-sm backdrop-blur dark:border-white/[0.06] dark:bg-white/[0.03]";
+
+function getStreamConnectionLabel(state: MetaAgentStreamConnectionState) {
+  switch (state) {
+    case "connecting":
+      return "连接中";
+    case "streaming":
+      return "流式同步中";
+    case "reconnecting":
+      return "重连中";
+    case "closed":
+      return "已关闭";
+    case "error":
+      return "连接异常";
+    default:
+      return "待连接";
+  }
+}
+
+function getStreamSessionStateLabel(status: MetaAgentSessionStateEvent["status"]) {
+  switch (status) {
+    case "awaiting_input":
+      return "等待人工输入";
+    case "running":
+      return "运行中";
+    case "done":
+      return "已完成";
+    case "failed":
+      return "已失败";
+    default:
+      return status;
+  }
+}
 
 const phaseLabels: Record<string, string> = {
   plan: "规划",
@@ -651,7 +752,16 @@ function MetaAgentPageContent() {
   const [trainingStats, setTrainingStats] = useState<TrainingStats | null>(null);
   const [trainingLoading, setTrainingLoading] = useState(false);
   const [showTraining, setShowTraining] = useState(false);
+  const [streamRecords, setStreamRecords] = useState<MetaAgentStreamRecord[]>([]);
+  const [streamConnectionState, setStreamConnectionState] = useState<MetaAgentStreamConnectionState>("idle");
+  const [streamError, setStreamError] = useState("");
+  const [streamLastSeq, setStreamLastSeq] = useState(-1);
+  const [pendingHumanInput, setPendingHumanInput] = useState<PendingHumanInputState | null>(null);
+  const [humanInputDraft, setHumanInputDraft] = useState("");
+  const [submittingHumanInput, setSubmittingHumanInput] = useState(false);
   const autoLoadedSessionIdRef = useRef<string | null>(null);
+  const streamLastSeqRef = useRef(-1);
+  const streamSessionIdRef = useRef<string | null>(null);
 
   /** Fetch Bandit stats */
   const refreshBanditStats = useCallback(async () => {
@@ -794,6 +904,13 @@ function MetaAgentPageContent() {
     setExpandedIter(new Set((session.result?.steps ?? session.result?.iterations ?? nextSteps).map((it) => it.step ?? it.iteration)));
     setRunning(session.status === "running");
     setShowTrace(true);
+    setPendingHumanInput(session.pendingInput?.awaiting
+      ? {
+          prompt: session.pendingInput.prompt,
+          token: session.pendingInput.inputToken || "",
+          requestedAt: session.pendingInput.requestedAt,
+        }
+      : null);
     setError(session.status === "error" ? (session.errorMessage || "Meta-Agent 执行失败") : "");
   }, []);
 
@@ -824,6 +941,106 @@ function MetaAgentPageContent() {
       setError(err instanceof Error ? err.message : "加载 Session 失败");
     }
   }, [applySessionToView]);
+
+  const refreshPendingHumanInput = useCallback(async (targetSessionId: string) => {
+    try {
+      const res = await fetch(`/api/meta-agent/input?sessionId=${encodeURIComponent(targetSessionId)}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return;
+
+      if (data?.awaiting && typeof data.inputToken === "string") {
+        setPendingHumanInput((current) => ({
+          prompt: typeof data.prompt === "string" && data.prompt.trim()
+            ? data.prompt
+            : (current?.prompt || "Planner 已暂停，等待你确认计划或补充说明后继续执行。"),
+          token: data.inputToken,
+          requestedAt: typeof data.requestedAt === "string" && data.requestedAt
+            ? data.requestedAt
+            : (current?.requestedAt || new Date().toISOString()),
+        }));
+      } else {
+        setPendingHumanInput(null);
+        setHumanInputDraft("");
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const appendStreamRecord = useCallback((event: MetaAgentSessionEvent) => {
+    if (typeof event.seq === "number" && event.seq >= 0) {
+      streamLastSeqRef.current = Math.max(streamLastSeqRef.current, event.seq);
+      setStreamLastSeq(streamLastSeqRef.current);
+    }
+
+    setStreamRecords((current) => {
+      if (current.some((item) => item.event.seq === event.seq && item.event.type === event.type)) {
+        return current;
+      }
+      const next = [...current, { receivedAt: new Date().toISOString(), event }]
+        .sort((left, right) => left.event.seq - right.event.seq);
+      return next.slice(-180);
+    });
+
+    if (event.type === "log_line") {
+      return;
+    }
+
+    if (event.type === "step_progress") {
+      setLivePhase(event.phase);
+      setLiveIteration(event.step);
+      return;
+    }
+
+    if (event.status === "awaiting_input") {
+      setPendingHumanInput({
+        prompt: event.inputPrompt || "Planner 已暂停，等待你确认计划或补充说明后继续执行。",
+        token: event.inputToken || "",
+        requestedAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    if (event.status === "running") {
+      setPendingHumanInput(null);
+      setHumanInputDraft("");
+      return;
+    }
+
+    if (event.status === "done" || event.status === "failed") {
+      setPendingHumanInput(null);
+      setHumanInputDraft("");
+    }
+  }, []);
+
+  const onSubmitHumanInput = useCallback(async (value: string) => {
+    if (!sessionId || !pendingHumanInput?.token || submittingHumanInput) return;
+
+    setSubmittingHumanInput(true);
+    setError("");
+    try {
+      const res = await fetch("/api/meta-agent/input", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId,
+          inputToken: pendingHumanInput.token,
+          value,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+
+      setPendingHumanInput(null);
+      setHumanInputDraft("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "提交人工输入失败");
+    } finally {
+      setSubmittingHumanInput(false);
+    }
+  }, [pendingHumanInput?.token, sessionId, submittingHumanInput]);
 
   const availableSessionProjects = useMemo(
     () => Array.from(new Set(sessionList.map((session) => session.projectId).filter(Boolean))).sort(),
@@ -955,6 +1172,117 @@ function MetaAgentPageContent() {
     setProjectId(requestedProjectId);
   }, [searchParams, sessionId]);
 
+  useEffect(() => {
+    if (streamSessionIdRef.current === sessionId) return;
+
+    streamSessionIdRef.current = sessionId;
+    streamLastSeqRef.current = -1;
+    setStreamLastSeq(-1);
+    setStreamRecords([]);
+    setStreamError("");
+    setPendingHumanInput(null);
+    setHumanInputDraft("");
+    setSubmittingHumanInput(false);
+    setStreamConnectionState(sessionId ? "connecting" : "idle");
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!sessionId || !running) return;
+
+    let cancelled = false;
+
+    const syncGateState = async () => {
+      await refreshPendingHumanInput(sessionId);
+    };
+
+    void syncGateState();
+    const timer = setInterval(() => {
+      if (cancelled) return;
+      void syncGateState();
+    }, 15000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [refreshPendingHumanInput, running, sessionId]);
+
+  useEffect(() => {
+    if (!sessionId || !running) return;
+
+    let closed = false;
+    let reconnectAttempts = 0;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let source: EventSource | null = null;
+
+    const cleanup = () => {
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      source?.close();
+      source = null;
+    };
+
+    const connect = () => {
+      if (closed) return;
+
+      const afterSeq = streamLastSeqRef.current;
+      const url = `/api/meta-agent/stream?sessionId=${encodeURIComponent(sessionId)}&afterSeq=${afterSeq}`;
+      setStreamConnectionState(reconnectAttempts > 0 ? "reconnecting" : "connecting");
+      source = new EventSource(url);
+
+      source.onopen = () => {
+        if (closed) return;
+        reconnectAttempts = 0;
+        setStreamConnectionState("streaming");
+        setStreamError("");
+      };
+
+      source.onmessage = (message) => {
+        if (closed) return;
+        try {
+          const event = JSON.parse(message.data) as MetaAgentSessionEvent;
+          appendStreamRecord(event);
+
+          if (event.type === "session_state" && (event.status === "done" || event.status === "failed")) {
+            closed = true;
+            cleanup();
+            setStreamConnectionState("closed");
+            setRunning(false);
+            void loadSessionSnapshot(sessionId);
+            void refreshSessionList();
+          }
+        } catch {
+          // ignore malformed stream frame
+        }
+      };
+
+      source.onerror = () => {
+        cleanup();
+        if (closed) return;
+
+        if (reconnectAttempts >= 6) {
+          setStreamConnectionState("error");
+          setStreamError("流式连接已中断，页面会继续依赖快照轮询。");
+          return;
+        }
+
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 10_000);
+        reconnectAttempts += 1;
+        setStreamConnectionState("reconnecting");
+        reconnectTimer = setTimeout(connect, delay);
+      };
+    };
+
+    connect();
+
+    return () => {
+      closed = true;
+      cleanup();
+    };
+  }, [appendStreamRecord, loadSessionSnapshot, refreshSessionList, running, sessionId]);
+
   const toggleIter = useCallback((n: number) => {
     setExpandedIter((prev) => {
       const next = new Set(prev);
@@ -1031,6 +1359,13 @@ function MetaAgentPageContent() {
         setLiveIteration(session.currentStep ?? session.currentIteration);
         setLiveSteps(Array.isArray(session.steps) ? session.steps : (Array.isArray(session.iterations) ? session.iterations : []));
         setLiveRunState(session.supervisorRunState ?? null);
+        setPendingHumanInput(session.pendingInput?.awaiting
+          ? {
+              prompt: session.pendingInput.prompt,
+              token: session.pendingInput.inputToken || "",
+              requestedAt: session.pendingInput.requestedAt,
+            }
+          : null);
 
         if (session.status === "done" || session.status === "error") {
           setRunning(false);
@@ -1252,6 +1587,106 @@ function MetaAgentPageContent() {
       currentTodoAssignee: currentTodo?.assignee,
     };
   }, [traceRunState, sessionSnapshot, maxStepLimit, liveIteration, displayIterations, result]);
+
+  const latestStreamStep = useMemo(() => {
+    for (let index = streamRecords.length - 1; index >= 0; index -= 1) {
+      const candidate = streamRecords[index]?.event;
+      if (candidate?.type === "step_progress") {
+        return candidate;
+      }
+    }
+    return null;
+  }, [streamRecords]);
+
+  const latestStreamSessionState = useMemo(() => {
+    for (let index = streamRecords.length - 1; index >= 0; index -= 1) {
+      const candidate = streamRecords[index]?.event;
+      if (candidate?.type === "session_state") {
+        return candidate;
+      }
+    }
+    return null;
+  }, [streamRecords]);
+
+  const liveConsoleStats = useMemo(() => {
+    const stepEvent = latestStreamStep;
+    const sessionState = latestStreamSessionState?.status;
+    const doneCount = stepEvent?.todoSummary.filter((todo) => todo.status === "done").length ?? runtimeSignals?.doneTodos ?? 0;
+    const todoCount = stepEvent?.todoSummary.length ?? runtimeSignals?.todoCount ?? 0;
+
+    return {
+      sessionStateLabel: sessionState ? getStreamSessionStateLabel(sessionState) : (running ? "运行中" : "待机"),
+      todoProgress: todoCount > 0 ? `${doneCount}/${todoCount}` : (runtimeSignals ? `${runtimeSignals.doneTodos}/${runtimeSignals.todoCount}` : "-"),
+      totalTokens: stepEvent?.totalTokens ?? runtimeSignals?.totalTokens ?? 0,
+      llmCalls: stepEvent?.llmCallCount ?? runtimeSignals?.llmCalls ?? 0,
+      latestStep: stepEvent?.step ?? liveIteration ?? sessionSnapshot?.currentStep ?? null,
+      latestPhase: stepEvent?.phase ?? livePhase ?? sessionSnapshot?.currentPhase ?? null,
+      openIssues: runtimeSignals?.openIssues ?? 0,
+    };
+  }, [latestStreamSessionState, latestStreamStep, liveIteration, livePhase, running, runtimeSignals, sessionSnapshot]);
+
+  const liveLogLines = useMemo(() => {
+    return streamRecords
+      .map((item) => item.event)
+      .filter((event): event is MetaAgentLogLineEvent => event.type === "log_line")
+      .slice(-8)
+      .reverse()
+      .map((event) => {
+        const parsed = parseTraceMessage(event.message);
+        return {
+          ...event,
+          actionLabel: localizeAction(event.action),
+          payload: parsed ? localizeTraceValue(parsed) : null,
+          messageText: localizeTraceText(event.message),
+        };
+      });
+  }, [parseTraceMessage, streamRecords]);
+
+  const liveStreamTimeline = useMemo(() => {
+    return streamRecords
+      .slice(-24)
+      .reverse()
+      .map((record) => {
+        const { event } = record;
+
+        if (event.type === "log_line") {
+          const parsed = parseTraceMessage(event.message);
+          return {
+            key: `${event.type}_${event.seq}`,
+            timestamp: event.timestamp || record.receivedAt,
+            label: localizeAction(event.action),
+            accent: "violet" as const,
+            summary: `${event.actor} · Todo ${event.todo_id}`,
+            detail: parsed
+              ? JSON.stringify(localizeTraceValue(parsed), null, 2)
+              : localizeTraceText(event.message),
+          };
+        }
+
+        if (event.type === "step_progress") {
+          const doneCount = event.todoSummary.filter((todo) => todo.status === "done").length;
+          return {
+            key: `${event.type}_${event.seq}`,
+            timestamp: record.receivedAt,
+            label: `Step ${event.step}`,
+            accent: "sky" as const,
+            summary: `${phaseLabels[event.phase] ?? event.phase} · ${doneCount}/${event.todoSummary.length} Todo 已完成`,
+            detail: `tokens=${event.totalTokens.toLocaleString()} · llmCalls=${event.llmCallCount}`,
+          };
+        }
+
+        return {
+          key: `${event.type}_${event.seq}`,
+          timestamp: record.receivedAt,
+          label: getStreamSessionStateLabel(event.status),
+          accent: event.status === "awaiting_input" ? ("amber" as const) : ("emerald" as const),
+          summary: event.status === "awaiting_input"
+            ? "等待人工确认或补充说明"
+            : "会话状态更新",
+          detail: event.inputPrompt || "",
+        };
+      });
+  }, [parseTraceMessage, streamRecords]);
 
   const tokenBreakdown = useMemo(() => {
     if (!traceRunState?.execution_log?.length) return [] as Array<{
@@ -1754,6 +2189,11 @@ function MetaAgentPageContent() {
   const quickNavSections = useMemo(() => {
     const sections: Array<{ id: string; label: string }> = [];
     if (sessionList.length > 0) sections.push({ id: "session-center", label: "历史运行" });
+    if (sessionId && (running || streamRecords.length > 0)) {
+      sections.push({ id: "live-console", label: "实时中控" });
+      sections.push({ id: "human-loop", label: "人在回路" });
+      sections.push({ id: "stream-feed", label: "流式过程" });
+    }
     if (missionControlSummary) sections.push({ id: "mission-control", label: "运行概览" });
     if (executionMap.columns.length > 0) sections.push({ id: "execution-map", label: "任务流转" });
     if (runtimeSignals) sections.push({ id: "runtime-signals", label: "运行信号" });
@@ -1796,6 +2236,9 @@ function MetaAgentPageContent() {
     result,
     displayIterations,
     showAdvancedDetails,
+    sessionId,
+    running,
+    streamRecords.length,
   ]);
 
   const onJumpToSection = useCallback((sectionId: string) => {
@@ -2201,6 +2644,235 @@ function MetaAgentPageContent() {
         </div>
       )}
 
+      {sessionId && (running || streamRecords.length > 0 || pendingHumanInput) && (
+        <div className="grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
+          <Card className={sectionCard} id="live-console">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Zap className="h-4 w-4 text-sky-500" />
+                运行中控台
+                <span className="ml-auto rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-normal text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                  {getStreamConnectionLabel(streamConnectionState)}
+                </span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
+                  <p className="text-[11px] text-slate-500">会话状态</p>
+                  <p className="mt-1 text-sm font-semibold">{liveConsoleStats.sessionStateLabel}</p>
+                </div>
+                <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
+                  <p className="text-[11px] text-slate-500">当前进度</p>
+                  <p className="mt-1 text-sm font-semibold">{liveConsoleStats.todoProgress}</p>
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    {liveConsoleStats.latestPhase ? (phaseLabels[liveConsoleStats.latestPhase] ?? liveConsoleStats.latestPhase) : "等待首个事件"}
+                  </p>
+                </div>
+                <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
+                  <p className="text-[11px] text-slate-500">Token / 调用</p>
+                  <p className="mt-1 text-sm font-semibold">
+                    {liveConsoleStats.totalTokens.toLocaleString()} / {liveConsoleStats.llmCalls}
+                  </p>
+                </div>
+                <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
+                  <p className="text-[11px] text-slate-500">流式事件</p>
+                  <p className="mt-1 text-sm font-semibold">{streamRecords.length}</p>
+                  <p className="mt-1 text-[11px] text-slate-500">lastSeq={streamLastSeq >= 0 ? streamLastSeq : "-"}</p>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-black/[0.05] bg-slate-50/80 p-3 dark:border-white/[0.06] dark:bg-slate-900/70">
+                <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                  <span className="font-mono">{sessionId}</span>
+                  {latestStreamSessionState && (
+                    <span className={`rounded-full px-2 py-0.5 ${
+                      latestStreamSessionState.status === "awaiting_input"
+                        ? "bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300"
+                        : latestStreamSessionState.status === "done"
+                          ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
+                          : latestStreamSessionState.status === "failed"
+                            ? "bg-rose-100 text-rose-700 dark:bg-rose-950/40 dark:text-rose-300"
+                            : "bg-sky-100 text-sky-700 dark:bg-sky-950/40 dark:text-sky-300"
+                    }`}>
+                      {getStreamSessionStateLabel(latestStreamSessionState.status)}
+                    </span>
+                  )}
+                  <span>openIssues={liveConsoleStats.openIssues}</span>
+                </div>
+                <p className="mt-2 text-sm text-slate-700 dark:text-slate-200">
+                  {runtimeSignals?.currentTodoTitle
+                    ? `当前焦点 Todo：${runtimeSignals.currentTodoTitle}${runtimeSignals.currentTodoAssignee ? ` · ${runtimeSignals.currentTodoAssignee}` : ""}`
+                    : "当前还没有可展示的焦点 Todo，页面会随着 SSE 事件实时补齐。"}
+                </p>
+                {streamError && (
+                  <p className="mt-2 text-xs text-amber-600 dark:text-amber-300">{streamError}</p>
+                )}
+              </div>
+
+              <div>
+                <p className="mb-2 text-xs font-medium text-slate-500">最新执行片段</p>
+                <div className="space-y-2">
+                  {liveLogLines.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-black/[0.06] px-3 py-4 text-xs text-slate-500 dark:border-white/[0.08]">
+                      暂时还没有流式日志，连接建立后会在这里实时滚动展示。
+                    </div>
+                  ) : (
+                    liveLogLines.map((log) => (
+                      <div key={`${log.seq}_${log.todo_id}`} className="rounded-xl border border-black/[0.05] bg-white px-3 py-3 text-xs dark:border-white/[0.06] dark:bg-slate-950/60">
+                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+                          <span className="font-mono">{log.timestamp}</span>
+                          <span className="rounded-full bg-slate-100 px-2 py-0.5 dark:bg-slate-800">{log.actionLabel}</span>
+                          <span>Todo={log.todo_id}</span>
+                          <span>Actor={log.actor}</span>
+                        </div>
+                        {log.payload ? (
+                          <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-lg bg-slate-50 p-2 text-[11px] text-slate-600 dark:bg-slate-900 dark:text-slate-300">
+                            {JSON.stringify(log.payload, null, 2)}
+                          </pre>
+                        ) : (
+                          <p className="mt-2 break-words text-slate-600 dark:text-slate-300">{log.messageText}</p>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className={sectionCard} id="human-loop">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Brain className="h-4 w-4 text-amber-500" />
+                人在回路
+                <span className={`ml-auto rounded-full px-2 py-0.5 text-[11px] font-normal ${
+                  pendingHumanInput
+                    ? "bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300"
+                    : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+                }`}>
+                  {pendingHumanInput ? "待处理" : "自动通过"}
+                </span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className={`rounded-2xl border p-4 ${
+                pendingHumanInput
+                  ? "border-amber-200 bg-amber-50/70 dark:border-amber-800 dark:bg-amber-950/20"
+                  : "border-black/[0.05] bg-slate-50/80 dark:border-white/[0.06] dark:bg-slate-900/70"
+              }`}>
+                <p className="text-xs font-medium text-slate-500">当前状态</p>
+                <p className="mt-2 text-sm font-semibold text-slate-800 dark:text-slate-100">
+                  {pendingHumanInput
+                    ? "Planner 已暂停，等待你确认初始 Todo 计划"
+                    : "当前没有待审批的计划节点，Meta-Agent 会沿既有链路继续运行。"}
+                </p>
+                <p className="mt-2 text-xs text-slate-500">
+                  {pendingHumanInput
+                    ? `触发时间：${pendingHumanInput.requestedAt}`
+                    : "当规划器产出初始计划时，这里会自动切换为确认面板。"}
+                </p>
+                {pendingHumanInput?.prompt && (
+                  <pre className="mt-3 overflow-x-auto whitespace-pre-wrap rounded-xl bg-white p-3 text-xs leading-6 text-slate-700 dark:bg-slate-950 dark:text-slate-200">
+                    {pendingHumanInput.prompt}
+                  </pre>
+                )}
+              </div>
+
+              <Textarea
+                value={humanInputDraft}
+                onChange={(event) => setHumanInputDraft(event.target.value)}
+                placeholder="可输入修改建议、约束说明或审批意见。留空提交表示直接确认继续。"
+                className="min-h-[132px] rounded-2xl"
+                disabled={!pendingHumanInput || submittingHumanInput}
+              />
+
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  className="h-9 gap-2 bg-amber-600 hover:bg-amber-700"
+                  disabled={!pendingHumanInput || submittingHumanInput}
+                  onClick={() => void onSubmitHumanInput(humanInputDraft)}
+                >
+                  {submittingHumanInput ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                  提交意见并继续
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-9"
+                  disabled={!pendingHumanInput || submittingHumanInput}
+                  onClick={() => void onSubmitHumanInput("")}
+                >
+                  直接确认继续
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-9"
+                  disabled={!sessionId}
+                  onClick={() => sessionId ? void refreshPendingHumanInput(sessionId) : undefined}
+                >
+                  刷新待处理状态
+                </Button>
+              </div>
+
+              <p className="text-xs text-slate-500">
+                这一步只负责人工确认，不会改动 Meta-Agent 的通用主链路。空白提交表示接受当前计划，带文本提交则把你的备注写入执行上下文后继续。
+              </p>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {sessionId && (running || streamRecords.length > 0) && (
+        <Card className={sectionCard} id="stream-feed">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <GitBranch className="h-4 w-4 text-violet-500" />
+              过程流式展示
+              <span className="ml-auto text-xs font-normal text-slate-500">
+                {streamRecords.length} 条实时事件
+              </span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {liveStreamTimeline.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-black/[0.06] px-4 py-5 text-sm text-slate-500 dark:border-white/[0.08]">
+                流式连接已准备好，新的调度、日志与 HITL 事件会在这里按时间滚动出现。
+              </div>
+            ) : (
+              <div className="max-h-[420px] space-y-2 overflow-y-auto pr-1">
+                {liveStreamTimeline.map((item) => (
+                  <div key={item.key} className="rounded-xl border border-black/[0.05] bg-slate-50/80 px-3 py-3 text-xs dark:border-white/[0.06] dark:bg-slate-900/70">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-mono text-[11px] text-slate-500">{item.timestamp}</span>
+                      <span className={`rounded-full px-2 py-0.5 text-[11px] ${
+                        item.accent === "amber"
+                          ? "bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300"
+                          : item.accent === "emerald"
+                            ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
+                            : item.accent === "sky"
+                              ? "bg-sky-100 text-sky-700 dark:bg-sky-950/40 dark:text-sky-300"
+                              : "bg-violet-100 text-violet-700 dark:bg-violet-950/40 dark:text-violet-300"
+                      }`}>
+                        {item.label}
+                      </span>
+                      <span className="text-slate-500">{item.summary}</span>
+                    </div>
+                    {item.detail && (
+                      <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-lg bg-white p-2 text-[11px] text-slate-600 dark:bg-slate-950 dark:text-slate-300">
+                        {item.detail}
+                      </pre>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
       {running && liveSteps.length > 0 && (
         <Card className={sectionCard}>
           <CardHeader>
@@ -2477,32 +3149,32 @@ function MetaAgentPageContent() {
           <CardContent className="space-y-4">
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
               <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                <p className="text-[11px] text-slate-500">Current State</p>
+                <p className="text-[11px] text-slate-500">当前状态</p>
                 <p className="mt-1 text-sm font-semibold">{localizeTraceText(sessionSnapshot.controlPlaneSummary.currentState)}</p>
               </div>
               <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                <p className="text-[11px] text-slate-500">Owner</p>
+                <p className="text-[11px] text-slate-500">持有者</p>
                 <p className="mt-1 text-sm font-semibold">{sessionSnapshot.controlPlaneSummary.owner}</p>
                 <p className="mt-1 text-[11px] text-slate-500">{sessionSnapshot.controlPlaneSummary.ownerReason}</p>
               </div>
               <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                <p className="text-[11px] text-slate-500">Budget</p>
+                <p className="text-[11px] text-slate-500">步骤预算</p>
                 <p className="mt-1 text-sm font-semibold">
-                  {sessionSnapshot.controlPlaneSummary.budget.usedSteps} / {sessionSnapshot.controlPlaneSummary.budget.maxSteps} steps
+                  {sessionSnapshot.controlPlaneSummary.budget.usedSteps} / {sessionSnapshot.controlPlaneSummary.budget.maxSteps} 步
                 </p>
                 <p className="mt-1 text-[11px] text-slate-500">
-                  remaining={sessionSnapshot.controlPlaneSummary.budget.remainingSteps}
+                  剩余={sessionSnapshot.controlPlaneSummary.budget.remainingSteps}
                 </p>
               </div>
               <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                <p className="text-[11px] text-slate-500">Checkpoint / Replay</p>
+                <p className="text-[11px] text-slate-500">检查点 / 回放候选</p>
                 <p className="mt-1 text-sm font-semibold">
                   {sessionSnapshot.controlPlaneSummary.checkpointCount} / {sessionSnapshot.controlPlaneSummary.replayCandidateCount}
                 </p>
-                <p className="mt-1 text-[11px] text-slate-500">checkpoints / replay candidates</p>
+                <p className="mt-1 text-[11px] text-slate-500">检查点 / 回放候选数</p>
               </div>
               <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                <p className="text-[11px] text-slate-500">Approval Mode</p>
+                <p className="text-[11px] text-slate-500">审批模式</p>
                 <p className="mt-1 text-sm font-semibold">{sessionSnapshot.controlPlaneSummary.approvalMode.mode}</p>
                 <p className="mt-1 text-[11px] text-slate-500">{sessionSnapshot.controlPlaneSummary.approvalMode.summary}</p>
               </div>
@@ -2510,7 +3182,7 @@ function MetaAgentPageContent() {
 
             <div className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
               <div className="space-y-2">
-                <p className="text-xs font-medium text-slate-500">Allowed Actions</p>
+                <p className="text-xs font-medium text-slate-500">允许的操作</p>
                 <div className="flex flex-wrap gap-2 rounded-xl border border-black/[0.04] p-3 dark:border-white/[0.06]">
                   {sessionSnapshot.controlPlaneSummary.allowedActions.map((action) => (
                     <span key={action} className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-200">
@@ -2521,12 +3193,12 @@ function MetaAgentPageContent() {
               </div>
 
               <div className="space-y-2">
-                <p className="text-xs font-medium text-slate-500">Recovery Policy</p>
+                <p className="text-xs font-medium text-slate-500">恢复策略</p>
                 <div className="rounded-xl border border-black/[0.04] p-3 text-xs text-slate-600 dark:border-white/[0.06] dark:text-slate-300">
-                  <p>retry / todo: {sessionSnapshot.controlPlaneSummary.recoveryPolicy.maxRetryPerTodo}</p>
-                  <p className="mt-1">reroute / todo: {sessionSnapshot.controlPlaneSummary.recoveryPolicy.maxReroutePerTodo}</p>
-                  <p className="mt-1">recovery history / todo: {sessionSnapshot.controlPlaneSummary.recoveryPolicy.maxRecoveryHistoryPerTodo}</p>
-                  <p className="mt-1">review-fail retry budget: {sessionSnapshot.controlPlaneSummary.recoveryPolicy.reviewFailRetryBudget}</p>
+                  <p>每 Todo 最大重试数: {sessionSnapshot.controlPlaneSummary.recoveryPolicy.maxRetryPerTodo}</p>
+                  <p className="mt-1">每 Todo 最大改派数: {sessionSnapshot.controlPlaneSummary.recoveryPolicy.maxReroutePerTodo}</p>
+                  <p className="mt-1">每 Todo 恢复历史上限: {sessionSnapshot.controlPlaneSummary.recoveryPolicy.maxRecoveryHistoryPerTodo}</p>
+                  <p className="mt-1">评审失败重试预算: {sessionSnapshot.controlPlaneSummary.recoveryPolicy.reviewFailRetryBudget}</p>
                 </div>
               </div>
             </div>
@@ -2544,14 +3216,14 @@ function MetaAgentPageContent() {
           </CardHeader>
           <CardContent className="grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
             <div className="space-y-2">
-              <p className="text-xs font-medium text-slate-500">State machine trajectory</p>
+              <p className="text-xs font-medium text-slate-500">状态机轨迹</p>
               <div className="max-h-[360px] space-y-2 overflow-y-auto rounded-xl border border-black/[0.04] p-3 dark:border-white/[0.06]">
                 {controlTrajectory.length === 0 ? (
-                  <p className="text-xs text-slate-500">No control checkpoints have been emitted yet.</p>
+                  <p className="text-xs text-slate-500">暂无控制检查点。</p>
                 ) : controlTrajectory.map((item) => (
                   <div key={item.checkpointId} className="rounded-xl bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-mono text-[11px] text-slate-500">step {item.step}</span>
+                      <span className="font-mono text-[11px] text-slate-500">步骤 {item.step}</span>
                       <span className="rounded-full bg-white px-2 py-0.5 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
                         {localizeTraceText(item.runStatus)}
                       </span>
@@ -2561,9 +3233,9 @@ function MetaAgentPageContent() {
                       <span className="ml-auto text-[11px] text-slate-500">{item.createdAt}</span>
                     </div>
                     <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-500">
-                      <span>owner={item.owner}</span>
-                      <span>todo={item.currentTodoId ?? "-"}</span>
-                      <span>wave={item.currentWaveId ?? "-"}</span>
+                      <span>持有者={item.owner}</span>
+                      <span>Todo={item.currentTodoId ?? "-"}</span>
+                      <span>波次={item.currentWaveId ?? "-"}</span>
                       <span>progress={item.todoProgress}</span>
                       <span>issues={item.issueCount}</span>
                       <span>outputs={item.artifactCount}</span>
@@ -2592,14 +3264,14 @@ function MetaAgentPageContent() {
 
             <div className="space-y-4">
               <div className="space-y-2">
-                <p className="text-xs font-medium text-slate-500">Ownership handoff</p>
+                <p className="text-xs font-medium text-slate-500">控制权转移记录</p>
                 <div className="max-h-[180px] space-y-2 overflow-y-auto rounded-xl border border-black/[0.04] p-3 dark:border-white/[0.06]">
                   {ownerHandoffs.length === 0 ? (
-                    <p className="text-xs text-slate-500">No explicit owner transfer has been recorded yet.</p>
+                    <p className="text-xs text-slate-500">暂无控制权转移记录。</p>
                   ) : ownerHandoffs.map((item) => (
                     <div key={item.checkpointId} className="rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-mono text-[11px] text-slate-500">step {item.step}</span>
+                        <span className="font-mono text-[11px] text-slate-500">步骤 {item.step}</span>
                         <span className="rounded-full bg-white px-2 py-0.5 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
                           {localizeTraceText(item.phase)}
                         </span>
@@ -2613,23 +3285,23 @@ function MetaAgentPageContent() {
 
               {guardrailSignals && (
                 <div className="space-y-2">
-                  <p className="text-xs font-medium text-slate-500">Guardrails</p>
+                  <p className="text-xs font-medium text-slate-500">护栏</p>
                   <div className="rounded-xl border border-black/[0.04] p-3 text-xs text-slate-600 dark:border-white/[0.06] dark:text-slate-300">
-                    <p>approval mode: {guardrailSignals.approvalMode}</p>
-                    <p className="mt-1">pending approvals: {guardrailSignals.pendingApprovals}</p>
-                    <p className="mt-1">hard stop signal: {localizeTraceText(guardrailSignals.stopSignal)}</p>
+                    <p>审批模式: {guardrailSignals.approvalMode}</p>
+                    <p className="mt-1">待审批数: {guardrailSignals.pendingApprovals}</p>
+                    <p className="mt-1">强停信号: {localizeTraceText(guardrailSignals.stopSignal)}</p>
                     <p className="mt-1">
-                      retry / reroute / terminate: {guardrailSignals.retryAvailable ? "yes" : "no"} / {guardrailSignals.rerouteAvailable ? "yes" : "no"} / {guardrailSignals.terminateAvailable ? "yes" : "no"}
+                      可重试 / 可改派 / 可终止: {guardrailSignals.retryAvailable ? "是" : "否"} / {guardrailSignals.rerouteAvailable ? "是" : "否"} / {guardrailSignals.terminateAvailable ? "是" : "否"}
                     </p>
                     <p className="mt-2 text-[11px] text-slate-500">{guardrailSignals.approvalSummary}</p>
                   </div>
 
                   <div className="grid gap-3 xl:grid-cols-2">
                     <div className="space-y-2">
-                      <p className="text-[11px] font-medium text-slate-500">Open issues</p>
+                      <p className="text-[11px] font-medium text-slate-500">未解决问题</p>
                       <div className="space-y-2 rounded-xl border border-black/[0.04] p-3 dark:border-white/[0.06]">
                         {guardrailSignals.openIssues.length === 0 ? (
-                          <p className="text-xs text-slate-500">No open issue is currently blocking the controller.</p>
+                          <p className="text-xs text-slate-500">当前无阻塞性问题。</p>
                         ) : guardrailSignals.openIssues.map((issue) => (
                           <div key={issue.id} className="rounded-lg bg-rose-50/60 px-3 py-2 text-xs dark:bg-rose-950/20">
                             <p className="font-medium text-rose-700 dark:text-rose-300">{localizeIssueType(issue.type)}</p>
@@ -2640,15 +3312,15 @@ function MetaAgentPageContent() {
                     </div>
 
                     <div className="space-y-2">
-                      <p className="text-[11px] font-medium text-slate-500">Recent side effects</p>
+                      <p className="text-[11px] font-medium text-slate-500">最近产生的副作用</p>
                       <div className="space-y-2 rounded-xl border border-black/[0.04] p-3 dark:border-white/[0.06]">
                         {guardrailSignals.sideEffects.length === 0 ? (
-                          <p className="text-xs text-slate-500">No artifact or workspace side effect has been materialized yet.</p>
+                          <p className="text-xs text-slate-500">暂无产物或工作区文件产生。</p>
                         ) : guardrailSignals.sideEffects.map((effect) => (
                           <div key={effect.key} className="rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900">
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="font-medium text-slate-700 dark:text-slate-200">{effect.label}</span>
-                              <span className="text-slate-500">todo={effect.todoId}</span>
+                              <span className="text-slate-500">Todo={effect.todoId}</span>
                               <span className="ml-auto text-slate-500">{effect.producer}</span>
                             </div>
                             <p className="mt-1 text-slate-600 dark:text-slate-300">{effect.summary}</p>
@@ -2695,17 +3367,17 @@ function MetaAgentPageContent() {
                       }`}
                     >
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-mono text-[11px] text-slate-500">step {checkpoint.step}</span>
+                        <span className="font-mono text-[11px] text-slate-500">步骤 {checkpoint.step}</span>
                         <span className="rounded-full bg-white px-2 py-0.5 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
                           {localizeTraceText(checkpoint.runStatus)}
                         </span>
                         <span className="ml-auto text-[11px] text-slate-500">{checkpoint.createdAt}</span>
                       </div>
                       <p className="mt-1 text-slate-600 dark:text-slate-300">
-                        phase={checkpoint.phase} · owner={checkpoint.owner}
+                        阶段={checkpoint.phase} · 持有者={checkpoint.owner}
                       </p>
                       <p className="mt-1 text-slate-500">
-                        todos {checkpoint.summary.doneTodoCount}/{checkpoint.summary.todoCount} · issues {checkpoint.summary.issueCount} · artifacts {checkpoint.summary.artifactCount}
+                        todos {checkpoint.summary.doneTodoCount}/{checkpoint.summary.todoCount} · 问题 {checkpoint.summary.issueCount} · 产物 {checkpoint.summary.artifactCount}
                       </p>
                     </button>
                   );
@@ -2717,21 +3389,21 @@ function MetaAgentPageContent() {
               <div className="space-y-4">
                 <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                   <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                    <p className="text-[11px] text-slate-500">Checkpoint</p>
-                    <p className="mt-1 text-sm font-semibold">step {selectedCheckpoint.step}</p>
+                    <p className="text-[11px] text-slate-500">检查点</p>
+                    <p className="mt-1 text-sm font-semibold">步骤 {selectedCheckpoint.step}</p>
                   </div>
                   <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                    <p className="text-[11px] text-slate-500">Owner</p>
+                    <p className="text-[11px] text-slate-500">持有者</p>
                     <p className="mt-1 text-sm font-semibold">{selectedCheckpoint.owner}</p>
                   </div>
                   <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                    <p className="text-[11px] text-slate-500">Tokens / Calls</p>
+                    <p className="text-[11px] text-slate-500">Token / 调用次数</p>
                     <p className="mt-1 text-sm font-semibold">
                       {selectedCheckpoint.summary.totalTokens.toLocaleString()} / {selectedCheckpoint.summary.llmCalls}
                     </p>
                   </div>
                   <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                    <p className="text-[11px] text-slate-500">Artifacts / Files</p>
+                    <p className="text-[11px] text-slate-500">产物 / 工作区文件</p>
                     <p className="mt-1 text-sm font-semibold">
                       {selectedCheckpoint.summary.artifactCount} / {selectedCheckpoint.summary.workspaceFileCount}
                     </p>
@@ -2740,7 +3412,7 @@ function MetaAgentPageContent() {
 
                 <div className="grid gap-4 xl:grid-cols-2">
                   <div className="space-y-2">
-                    <p className="text-xs font-medium text-slate-500">Todo snapshot</p>
+                    <p className="text-xs font-medium text-slate-500">Todo 快照</p>
                     <div className="max-h-[240px] space-y-2 overflow-y-auto rounded-xl border border-black/[0.04] p-3 dark:border-white/[0.06]">
                       {selectedCheckpoint.snapshot.todos.map((todo) => (
                         <div key={todo.id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900">
@@ -2750,7 +3422,7 @@ function MetaAgentPageContent() {
                             <span className="ml-auto text-slate-500">{localizeTraceText(todo.status)}</span>
                           </div>
                           <p className="mt-1 text-slate-500">
-                            assignee={todo.assignee} · delegate={todo.delegationStatus} · retry={todo.retryCount} · reroute={todo.rerouteCount}
+                            执行者={todo.assignee} · 委派={todo.delegationStatus} · 重试={todo.retryCount} · 改派={todo.rerouteCount}
                           </p>
                         </div>
                       ))}
@@ -2758,7 +3430,7 @@ function MetaAgentPageContent() {
                   </div>
 
                   <div className="space-y-2">
-                    <p className="text-xs font-medium text-slate-500">Replay candidates</p>
+                    <p className="text-xs font-medium text-slate-500">回放候选</p>
                     <div className="space-y-2 rounded-xl border border-black/[0.04] p-3 dark:border-white/[0.06]">
                       {replayCandidatesForSelectedCheckpoint.length === 0 ? (
                         <p className="text-xs text-slate-500">当前 checkpoint 暂无单独 replay candidate。</p>
@@ -2771,10 +3443,10 @@ function MetaAgentPageContent() {
                             </span>
                           </div>
                           <p className="mt-1 text-slate-500">
-                            preserved artifacts={candidate.preservedArtifactCount}
+                            保留产物={candidate.preservedArtifactCount}
                           </p>
                           <p className="mt-1 text-slate-500">
-                            incomplete todos={candidate.incompleteTodoIds.join(", ") || "-"}
+                            未完成 Todo={candidate.incompleteTodoIds.join(", ") || "-"}
                           </p>
                         </div>
                       ))}
@@ -2789,10 +3461,10 @@ function MetaAgentPageContent() {
                 {(selectedCheckpoint.snapshot.issues.length > 0 || selectedCheckpoint.snapshot.artifacts.length > 0 || selectedCheckpoint.snapshot.workspaceFiles.length > 0) && (
                   <div className="grid gap-4 xl:grid-cols-3">
                     <div className="space-y-2">
-                      <p className="text-xs font-medium text-slate-500">Issues</p>
+                      <p className="text-xs font-medium text-slate-500">运行问题</p>
                       <div className="max-h-[200px] space-y-2 overflow-y-auto rounded-xl border border-black/[0.04] p-3 dark:border-white/[0.06]">
                         {selectedCheckpoint.snapshot.issues.length === 0 ? (
-                          <p className="text-xs text-slate-500">无 issues。</p>
+                          <p className="text-xs text-slate-500">无运行问题。</p>
                         ) : selectedCheckpoint.snapshot.issues.map((issue) => (
                           <div key={issue.id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900">
                             <p className="font-medium text-slate-700 dark:text-slate-200">{localizeIssueType(issue.type)}</p>
@@ -2803,10 +3475,10 @@ function MetaAgentPageContent() {
                     </div>
 
                     <div className="space-y-2">
-                      <p className="text-xs font-medium text-slate-500">Artifacts</p>
+                      <p className="text-xs font-medium text-slate-500">产物</p>
                       <div className="max-h-[200px] space-y-2 overflow-y-auto rounded-xl border border-black/[0.04] p-3 dark:border-white/[0.06]">
                         {selectedCheckpoint.snapshot.artifacts.length === 0 ? (
-                          <p className="text-xs text-slate-500">无 artifacts。</p>
+                          <p className="text-xs text-slate-500">无产物。</p>
                         ) : selectedCheckpoint.snapshot.artifacts.map((artifact) => (
                           <div key={artifact.id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900">
                             <p className="font-medium text-slate-700 dark:text-slate-200">{artifact.type}</p>
@@ -2817,10 +3489,10 @@ function MetaAgentPageContent() {
                     </div>
 
                     <div className="space-y-2">
-                      <p className="text-xs font-medium text-slate-500">Workspace Files</p>
+                      <p className="text-xs font-medium text-slate-500">工作区文件</p>
                       <div className="max-h-[200px] space-y-2 overflow-y-auto rounded-xl border border-black/[0.04] p-3 dark:border-white/[0.06]">
                         {selectedCheckpoint.snapshot.workspaceFiles.length === 0 ? (
-                          <p className="text-xs text-slate-500">无 workspace files。</p>
+                          <p className="text-xs text-slate-500">无工作区文件。</p>
                         ) : selectedCheckpoint.snapshot.workspaceFiles.map((file) => (
                           <div key={file.fileId} className="rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900">
                             <p className="font-medium text-slate-700 dark:text-slate-200">{file.kind}</p>
@@ -2852,33 +3524,33 @@ function MetaAgentPageContent() {
                 <p className="text-[11px] text-slate-500">控制焦点</p>
                 <p className="mt-1 text-sm font-semibold text-slate-700 dark:text-slate-200">{runtimeSignals.controlFocus}</p>
                 {runtimeSignals.currentTodoAssignee && (
-                <p className="mt-1 text-[11px] text-slate-500">assignee={runtimeSignals.currentTodoAssignee}</p>
+                <p className="mt-1 text-[11px] text-slate-500">执行者={runtimeSignals.currentTodoAssignee}</p>
                 )}
               </div>
               <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
                 <p className="text-[11px] text-slate-500">步骤预算</p>
                 <p className="mt-1 text-sm font-semibold">{runtimeSignals.stepUsed} / {runtimeSignals.stepBudget}</p>
-                <p className="mt-1 text-[11px] text-slate-500">remaining={runtimeSignals.stepRemaining}</p>
+                <p className="mt-1 text-[11px] text-slate-500">剩余={runtimeSignals.stepRemaining}</p>
               </div>
               <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
                 <p className="text-[11px] text-slate-500">Todo 进度</p>
                 <p className="mt-1 text-sm font-semibold">{runtimeSignals.doneTodos} / {runtimeSignals.todoCount}</p>
-                <p className="mt-1 text-[11px] text-slate-500">ready={runtimeSignals.readyTodos} active={runtimeSignals.activeTodos}</p>
+                <p className="mt-1 text-[11px] text-slate-500">就绪={runtimeSignals.readyTodos} 执行中={runtimeSignals.activeTodos}</p>
               </div>
               <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
                 <p className="text-[11px] text-slate-500">恢复压力</p>
-                <p className="mt-1 text-sm font-semibold">retry {runtimeSignals.retryTotal} / reroute {runtimeSignals.rerouteTotal}</p>
-                <p className="mt-1 text-[11px] text-slate-500">recovery records={runtimeSignals.recoveryTotal}</p>
+                <p className="mt-1 text-sm font-semibold">重试 {runtimeSignals.retryTotal} / 改派 {runtimeSignals.rerouteTotal}</p>
+                <p className="mt-1 text-[11px] text-slate-500">恢复记录={runtimeSignals.recoveryTotal}</p>
               </div>
               <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
                 <p className="text-[11px] text-slate-500">委派情况</p>
-                <p className="mt-1 text-sm font-semibold">delegate {runtimeSignals.delegatedTodos} / split {runtimeSignals.splitTodos}</p>
-                <p className="mt-1 text-[11px] text-slate-500">failed todos={runtimeSignals.failedTodos}</p>
+                <p className="mt-1 text-sm font-semibold">委派 {runtimeSignals.delegatedTodos} / 拆分 {runtimeSignals.splitTodos}</p>
+                <p className="mt-1 text-[11px] text-slate-500">失败={runtimeSignals.failedTodos}</p>
               </div>
               <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
                 <p className="text-[11px] text-slate-500">LLM 用量</p>
                 <p className="mt-1 text-sm font-semibold">{runtimeSignals.totalTokens.toLocaleString()} tokens</p>
-                <p className="mt-1 text-[11px] text-slate-500">calls={runtimeSignals.llmCalls} replans={runtimeSignals.replans} open_issues={runtimeSignals.openIssues}</p>
+                <p className="mt-1 text-[11px] text-slate-500">调用={runtimeSignals.llmCalls} 重规划={runtimeSignals.replans} 未解问题={runtimeSignals.openIssues}</p>
               </div>
             </div>
             {runtimeSignals.currentTodoTitle && (
@@ -2903,29 +3575,29 @@ function MetaAgentPageContent() {
               <>
                 <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
                   <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                    <p className="text-[11px] text-slate-500">Project</p>
+                    <p className="text-[11px] text-slate-500">项目</p>
                     <p className="mt-1 text-sm font-semibold">{sessionSnapshot.planningContextSummary.projectId}</p>
                   </div>
                   <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                    <p className="text-[11px] text-slate-500">Planning Hints</p>
+                    <p className="text-[11px] text-slate-500">规划提示数</p>
                     <p className="mt-1 text-sm font-semibold">{sessionSnapshot.planningContextSummary.hints.length}</p>
                   </div>
                   <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                    <p className="text-[11px] text-slate-500">Reusable Refs</p>
+                    <p className="text-[11px] text-slate-500">可复用引用</p>
                     <p className="mt-1 text-sm font-semibold">
                       {sessionSnapshot.planningContextSummary.selectedContext.reusableWorkspaceRefs.length}
                       <span className="ml-1 text-xs text-slate-400">/ {sessionSnapshot.planningContextSummary.inventory.reusableRefCount}</span>
                     </p>
                   </div>
                   <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                    <p className="text-[11px] text-slate-500">Planner Memories</p>
+                    <p className="text-[11px] text-slate-500">规划记忆</p>
                     <p className="mt-1 text-sm font-semibold">
                       {sessionSnapshot.planningContextSummary.selectedContext.plannerMemories.length}
                       <span className="ml-1 text-xs text-slate-400">/ {sessionSnapshot.planningContextSummary.inventory.plannerMemoryCount}</span>
                     </p>
                   </div>
                   <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                    <p className="text-[11px] text-slate-500">Failure Patterns</p>
+                    <p className="text-[11px] text-slate-500">失败模式</p>
                     <p className="mt-1 text-sm font-semibold">
                       {sessionSnapshot.planningContextSummary.selectedContext.recurringFailurePatterns.length}
                       <span className="ml-1 text-xs text-slate-400">/ {sessionSnapshot.planningContextSummary.inventory.failurePatternCount}</span>
@@ -2935,7 +3607,7 @@ function MetaAgentPageContent() {
 
                 {sessionSnapshot.planningContextSummary.hints.length > 0 && (
                   <div>
-                    <p className="mb-2 text-xs font-medium text-slate-500">Hints injected into planner</p>
+                    <p className="mb-2 text-xs font-medium text-slate-500">注入规划器的提示</p>
                     <div className="space-y-2 rounded-xl border border-black/[0.04] p-3 dark:border-white/[0.06]">
                       {sessionSnapshot.planningContextSummary.hints.map((hint, idx) => (
                         <p key={`${hint}_${idx}`} className="text-xs text-slate-600 dark:text-slate-300">{hint}</p>
@@ -2946,7 +3618,7 @@ function MetaAgentPageContent() {
 
                 <div className="grid gap-4 xl:grid-cols-2">
                   <div className="space-y-2">
-                    <p className="text-xs font-medium text-slate-500">Selected project context</p>
+                    <p className="text-xs font-medium text-slate-500">已选用的项目上下文</p>
                     <div className="space-y-2 rounded-xl border border-black/[0.04] p-3 dark:border-white/[0.06]">
                       {sessionSnapshot.planningContextSummary.selectedContext.successfulTodoSkeletons.map((item, idx) => (
                         <div key={`skeleton_${idx}`} className="rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900">
@@ -2970,7 +3642,7 @@ function MetaAgentPageContent() {
                   </div>
 
                   <div className="space-y-2">
-                    <p className="text-xs font-medium text-slate-500">Memory signals available to runtime</p>
+                    <p className="text-xs font-medium text-slate-500">运行时可用的记忆信号</p>
                     <div className="space-y-2 rounded-xl border border-black/[0.04] p-3 dark:border-white/[0.06]">
                       {sessionSnapshot.planningContextSummary.memorySignals.routingMemories.map((item, idx) => (
                         <div key={`routing_${idx}`} className="rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900">
@@ -3006,43 +3678,43 @@ function MetaAgentPageContent() {
               <div className="rounded-2xl border border-emerald-200 bg-emerald-50/40 p-4 dark:border-emerald-900 dark:bg-emerald-950/20">
                 <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
                   <div>
-                    <p className="text-[11px] text-emerald-700/70 dark:text-emerald-300/70">Run Summaries</p>
+                    <p className="text-[11px] text-emerald-700/70 dark:text-emerald-300/70">运行摘要数</p>
                     <p className="mt-1 text-sm font-semibold text-emerald-800 dark:text-emerald-200">{sessionSnapshot.memoryWritebackSummary.runSummaryCount}</p>
                   </div>
                   <div>
-                    <p className="text-[11px] text-emerald-700/70 dark:text-emerald-300/70">Refs / Skeletons</p>
+                    <p className="text-[11px] text-emerald-700/70 dark:text-emerald-300/70">引用 / 骨架</p>
                     <p className="mt-1 text-sm font-semibold text-emerald-800 dark:text-emerald-200">
                       {sessionSnapshot.memoryWritebackSummary.reusableRefCount} / {sessionSnapshot.memoryWritebackSummary.skeletonCount}
                     </p>
                   </div>
                   <div>
-                    <p className="text-[11px] text-emerald-700/70 dark:text-emerald-300/70">Routing / Review</p>
+                    <p className="text-[11px] text-emerald-700/70 dark:text-emerald-300/70">路由 / 评审记忆</p>
                     <p className="mt-1 text-sm font-semibold text-emerald-800 dark:text-emerald-200">
                       {sessionSnapshot.memoryWritebackSummary.routingMemoryCount} / {sessionSnapshot.memoryWritebackSummary.reviewMemoryCount}
                     </p>
                   </div>
                   <div>
-                    <p className="text-[11px] text-emerald-700/70 dark:text-emerald-300/70">Recovery Memories</p>
+                    <p className="text-[11px] text-emerald-700/70 dark:text-emerald-300/70">恢复记忆数</p>
                     <p className="mt-1 text-sm font-semibold text-emerald-800 dark:text-emerald-200">{sessionSnapshot.memoryWritebackSummary.recoveryMemoryCount}</p>
                   </div>
                   <div>
-                    <p className="text-[11px] text-emerald-700/70 dark:text-emerald-300/70">Stable Sources</p>
+                    <p className="text-[11px] text-emerald-700/70 dark:text-emerald-300/70">稳定来源数</p>
                     <p className="mt-1 text-sm font-semibold text-emerald-800 dark:text-emerald-200">{sessionSnapshot.memoryWritebackSummary.stableSourceProfileCount}</p>
                   </div>
                 </div>
                 {sessionSnapshot.memoryWritebackSummary.latestRunSummary && (
                   <div className="mt-4 rounded-xl bg-white/70 p-3 text-xs text-emerald-900 dark:bg-slate-900/60 dark:text-emerald-100">
                     <p className="font-medium">
-                      latest run: {sessionSnapshot.memoryWritebackSummary.latestRunSummary.terminalStatus}
+                      最近运行: {sessionSnapshot.memoryWritebackSummary.latestRunSummary.terminalStatus}
                       {" · "}
                       {sessionSnapshot.memoryWritebackSummary.latestRunSummary.doneTodoCount}/
                       {sessionSnapshot.memoryWritebackSummary.latestRunSummary.todoCount} todos
                       {" · "}
-                      recovery={sessionSnapshot.memoryWritebackSummary.latestRunSummary.recoveryCount}
+                      恢复次数={sessionSnapshot.memoryWritebackSummary.latestRunSummary.recoveryCount}
                     </p>
                     {sessionSnapshot.memoryWritebackSummary.latestRunSummary.majorArtifacts.length > 0 && (
                       <p className="mt-1 text-emerald-800/80 dark:text-emerald-200/80">
-                        artifacts: {sessionSnapshot.memoryWritebackSummary.latestRunSummary.majorArtifacts.map((item) => item.summary).join(" | ")}
+                        主要产物: {sessionSnapshot.memoryWritebackSummary.latestRunSummary.majorArtifacts.map((item) => item.summary).join(" | ")}
                       </p>
                     )}
                   </div>
@@ -3063,7 +3735,7 @@ function MetaAgentPageContent() {
           </CardHeader>
           <CardContent className="grid gap-4 xl:grid-cols-2">
             <div className="space-y-2">
-              <p className="text-xs font-medium text-slate-500">Recent recovery events</p>
+              <p className="text-xs font-medium text-slate-500">最近恢复事件</p>
               <div className="max-h-[260px] space-y-2 overflow-y-auto rounded-xl border border-black/[0.04] p-3 dark:border-white/[0.06]">
                 {recoveryTimeline.length === 0 ? (
                   <p className="text-xs text-slate-500">暂无 recovery timeline。</p>
@@ -3072,8 +3744,8 @@ function MetaAgentPageContent() {
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-mono text-[11px] text-slate-500">{event.timestamp}</span>
                       <span className="rounded-md bg-white px-1.5 py-0.5 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">{event.actionLabel}</span>
-                      <span className="text-[11px] text-slate-500">todo={event.todoId}</span>
-                      <span className="text-[11px] text-slate-500">actor={event.actor}</span>
+                      <span className="text-[11px] text-slate-500">Todo={event.todoId}</span>
+                      <span className="text-[11px] text-slate-500">执行者={event.actor}</span>
                     </div>
                     <pre className="mt-1 whitespace-pre-wrap rounded-md bg-white p-2 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">{event.message}</pre>
                   </div>
@@ -3083,7 +3755,7 @@ function MetaAgentPageContent() {
 
             <div className="space-y-4">
               <div>
-                <p className="mb-2 text-xs font-medium text-slate-500">Routing hotspots</p>
+                <p className="mb-2 text-xs font-medium text-slate-500">路由热点</p>
                 <div className="flex flex-wrap gap-2 rounded-xl border border-black/[0.04] p-3 dark:border-white/[0.06]">
                   {routingHotspots.length === 0 ? (
                     <p className="text-xs text-slate-500">暂无 assignee history。</p>
@@ -3096,7 +3768,7 @@ function MetaAgentPageContent() {
               </div>
 
               <div>
-                <p className="mb-2 text-xs font-medium text-slate-500">Recovered / rerouted todos</p>
+                <p className="mb-2 text-xs font-medium text-slate-500">已恢复 / 已改派的 Todo</p>
                 <div className="max-h-[260px] space-y-2 overflow-y-auto rounded-xl border border-black/[0.04] p-3 dark:border-white/[0.06]">
                   {recoveredTodos.length === 0 ? (
                     <p className="text-xs text-slate-500">暂无需要展示的 recovery todo。</p>
@@ -3110,11 +3782,11 @@ function MetaAgentPageContent() {
                         </span>
                       </div>
                       <div className="mt-1 flex flex-wrap gap-3 text-[11px] text-slate-500">
-                        <span>retry={todo.retry_count ?? 0}</span>
-                        <span>reroute={todo.reroute_count ?? 0}</span>
-                        <span>recovery={todo.recovery_history?.length ?? 0}</span>
-                        <span>assignee={todo.assignee ?? "-"}</span>
-                        {todo.forced_target_agent_id && <span>forced={todo.forced_target_agent_id}</span>}
+                        <span>重试={todo.retry_count ?? 0}</span>
+                        <span>改派={todo.reroute_count ?? 0}</span>
+                        <span>恢复={todo.recovery_history?.length ?? 0}</span>
+                        <span>执行者={todo.assignee ?? "-"}</span>
+                        {todo.forced_target_agent_id && <span>强制指派={todo.forced_target_agent_id}</span>}
                       </div>
                       {todo.last_failure_reason && (
                         <p className="mt-1 text-[11px] text-rose-600 dark:text-rose-300">{localizeTraceText(todo.last_failure_reason)}</p>
@@ -3147,7 +3819,7 @@ function MetaAgentPageContent() {
                   <div key={artifact.id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium text-slate-700 dark:text-slate-200">{artifact.type}</span>
-                      <span className="text-slate-500">todo={artifact.related_todo}</span>
+                      <span className="text-slate-500">Todo={artifact.related_todo}</span>
                       <span className="ml-auto text-slate-500">{artifact.producer}</span>
                     </div>
                     <p className="mt-1 break-all text-slate-500">{artifact.path}</p>
@@ -3165,8 +3837,8 @@ function MetaAgentPageContent() {
                     <div key={file.file_id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="font-medium text-slate-700 dark:text-slate-200">{file.kind}</span>
-                        <span className="text-slate-500">todo={file.related_todo}</span>
-                        {file.retention && <span className="text-slate-500">retention={file.retention}</span>}
+                        <span className="text-slate-500">Todo={file.related_todo}</span>
+                        {file.retention && <span className="text-slate-500">保留策略={file.retention}</span>}
                       </div>
                       <p className="mt-1 break-all text-slate-500">{file.path}</p>
                       <p className="mt-1 text-slate-600 dark:text-slate-300">{file.content_summary}</p>
@@ -3208,23 +3880,23 @@ function MetaAgentPageContent() {
 
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
                 <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                  <p className="text-[11px] text-slate-500">Run Status</p>
+                  <p className="text-[11px] text-slate-500">运行状态</p>
                   <p className="mt-1 text-sm font-semibold">{localizeTraceText(traceRunState.status)}</p>
                 </div>
                 <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                  <p className="text-[11px] text-slate-500">Current Todo</p>
+                  <p className="text-[11px] text-slate-500">当前 Todo</p>
                   <p className="mt-1 text-sm font-semibold">{traceRunState.current_todo_id ?? "-"}</p>
                 </div>
                 <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                  <p className="text-[11px] text-slate-500">Current Wave</p>
+                  <p className="text-[11px] text-slate-500">当前波次</p>
                   <p className="mt-1 text-sm font-semibold">{traceRunState.current_wave_id ?? "-"}</p>
                 </div>
                 <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                  <p className="text-[11px] text-slate-500">Todos / Waves</p>
+                  <p className="text-[11px] text-slate-500">Todo 数 / 波次数</p>
                   <p className="mt-1 text-sm font-semibold">{traceRunState.todos.length} / {traceRunState.wave_count ?? 0}</p>
                 </div>
                 <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
-                  <p className="text-[11px] text-slate-500">Logs / Issues</p>
+                  <p className="text-[11px] text-slate-500">日志条数 / 问题数</p>
                   <p className="mt-1 text-sm font-semibold">{traceRunState.execution_log?.length ?? 0} / {traceRunState.issues.length}</p>
                 </div>
               </div>
@@ -3279,7 +3951,7 @@ function MetaAgentPageContent() {
 
               {traceWaves.length > 0 && (
                 <div>
-                  <p className="mb-2 text-xs font-medium text-slate-500">Wave Trace</p>
+                  <p className="mb-2 text-xs font-medium text-slate-500">并行波次轨迹</p>
                   <div className="max-h-[240px] space-y-2 overflow-y-auto rounded-xl border border-black/[0.04] p-2 dark:border-white/[0.06]">
                     {traceWaves.slice().reverse().map((wave) => (
                       <div key={wave.wave_id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900">
@@ -3309,7 +3981,7 @@ function MetaAgentPageContent() {
               )}
 
               <div>
-                <p className="mb-2 text-xs font-medium text-slate-500">Execution Timeline</p>
+                <p className="mb-2 text-xs font-medium text-slate-500">执行时间线</p>
                 <div className="max-h-[280px] overflow-y-auto rounded-xl border border-black/[0.04] p-2 dark:border-white/[0.06]">
                   {traceTimelineView.length === 0 ? (
                     <p className="px-2 py-1 text-xs text-slate-500">暂无 execution log。</p>
@@ -3321,8 +3993,8 @@ function MetaAgentPageContent() {
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="font-mono text-[11px] text-slate-500">{log.timestamp}</span>
                               <span className="rounded-md bg-white px-1.5 py-0.5 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">{log.actionLabel}</span>
-                              <span className="text-[11px] text-slate-500">todo={log.todo_id}</span>
-                              <span className="text-[11px] text-slate-500">actor={log.actor}</span>
+                              <span className="text-[11px] text-slate-500">Todo={log.todo_id}</span>
+                              <span className="text-[11px] text-slate-500">执行者={log.actor}</span>
                             </div>
                             {log.localizedPayload ? (
                               <pre className="mt-1 overflow-x-auto whitespace-pre-wrap rounded-md bg-white p-2 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
@@ -3341,7 +4013,7 @@ function MetaAgentPageContent() {
 
               {traceRunState.issues.length > 0 && (
                 <div>
-                  <p className="mb-2 text-xs font-medium text-slate-500">Issues</p>
+                  <p className="mb-2 text-xs font-medium text-slate-500">运行问题</p>
                   <div className="max-h-[200px] space-y-2 overflow-y-auto rounded-xl border border-rose-200 bg-rose-50/40 p-2 dark:border-rose-900 dark:bg-rose-950/20">
                     {traceRunState.issues.map((issue) => (
                       <div key={issue.id} className="rounded-md bg-white px-3 py-2 text-xs dark:bg-slate-900">
@@ -3349,7 +4021,7 @@ function MetaAgentPageContent() {
                           <span className="rounded-md bg-rose-100 px-1.5 py-0.5 text-[11px] text-rose-600 dark:bg-rose-900/40 dark:text-rose-300">{issue.type}</span>
                           <span className="text-[11px] text-rose-600 dark:text-rose-300">{localizeIssueType(issue.type)}</span>
                           <span className="text-[11px] text-slate-500">{issue.status}</span>
-                          {issue.todo_id && <span className="text-[11px] text-slate-500">todo={issue.todo_id}</span>}
+                          {issue.todo_id && <span className="text-[11px] text-slate-500">Todo={issue.todo_id}</span>}
                         </div>
                         <p className="mt-1 break-words text-[12px] text-slate-700 dark:text-slate-200">{localizeTraceText(issue.message)}</p>
                       </div>
@@ -3622,7 +4294,7 @@ function MetaAgentPageContent() {
 function MetaAgentPageFallback() {
   return (
     <div className="rounded-3xl border border-black/[0.06] bg-white/80 px-5 py-6 text-sm text-slate-500 shadow-sm backdrop-blur dark:border-white/[0.06] dark:bg-white/[0.03] dark:text-slate-300">
-      Loading Meta-Agent...
+      Meta-Agent 加载中...
     </div>
   );
 }

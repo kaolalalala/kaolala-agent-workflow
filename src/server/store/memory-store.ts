@@ -3,18 +3,33 @@ import {
   AgentContext,
   AgentDefinition,
   AgentNode,
+  AllowedControlAction,
+  ApprovalRequestRecord,
+  ControlActionRecord,
+  ControlBudgetSnapshot,
+  ControlReplayScope,
+  ControlRecoveryPolicy,
   DevRunDetail,
   Event,
   HumanMessage,
   Message,
+  NodeControlStateRecord,
   NodeTrace,
   PromptTrace,
   Run,
+  RunControlStateRecord,
   StateTrace,
   Task,
   ToolTrace,
   WorkflowEdge,
 } from "@/server/domain";
+
+export interface RunControlPlaneSnapshot {
+  run: RunControlStateRecord | null;
+  nodes: NodeControlStateRecord[];
+  actions: ControlActionRecord[];
+  approvals: ApprovalRequestRecord[];
+}
 
 export interface RunSnapshot {
   run: Run;
@@ -26,6 +41,7 @@ export interface RunSnapshot {
   agentDefinitions: AgentDefinition[];
   agentContexts: AgentContext[];
   humanMessages: HumanMessage[];
+  controlPlane?: RunControlPlaneSnapshot;
 }
 
 // Events too frequent or large to persist individually
@@ -135,6 +151,120 @@ function toHumanMessage(r: Row): HumanMessage {
     content: r.content as string,
     attachments: p<HumanMessage["attachments"]>(r.attachments_json) ?? [],
     createdAt: r.created_at as string,
+  };
+}
+
+function toBudgetSnapshot(raw: unknown): ControlBudgetSnapshot {
+  const value = p<Partial<ControlBudgetSnapshot>>(raw) ?? {};
+  return {
+    maxSteps: num(value.maxSteps),
+    usedSteps: num(value.usedSteps) ?? 0,
+    maxTokens: num(value.maxTokens),
+    usedTokens: num(value.usedTokens) ?? 0,
+    maxCostUsd: num(value.maxCostUsd),
+    usedCostUsd: num(value.usedCostUsd) ?? 0,
+    maxWallMs: num(value.maxWallMs),
+    usedWallMs: num(value.usedWallMs) ?? 0,
+  };
+}
+
+function toAllowedActions(raw: unknown): AllowedControlAction[] {
+  const items = p<AllowedControlAction[]>(raw);
+  return Array.isArray(items) ? items : [];
+}
+
+function toRecoveryPolicy(raw: unknown): ControlRecoveryPolicy {
+  const value = p<Partial<ControlRecoveryPolicy>>(raw) ?? {};
+  return {
+    onFailure: (str(value.onFailure) as ControlRecoveryPolicy["onFailure"] | undefined) ?? "retry",
+    maxRetries: num(value.maxRetries),
+    fallbackTarget: str(value.fallbackTarget),
+    terminateReasons: Array.isArray(value.terminateReasons)
+      ? value.terminateReasons.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      : undefined,
+  };
+}
+
+function toReplayScope(raw: unknown): ControlReplayScope {
+  const value = p<Partial<ControlReplayScope>>(raw) ?? {};
+  return {
+    nodeReplayReady: Boolean(value.nodeReplayReady),
+    stepRerunReady: Boolean(value.stepRerunReady),
+    runCompareReady: Boolean(value.runCompareReady),
+  };
+}
+
+function toRunControl(r: Row): RunControlStateRecord {
+  return {
+    runId: r.run_id as string,
+    state: r.state as RunControlStateRecord["state"],
+    ownerKind: r.owner_kind as RunControlStateRecord["ownerKind"],
+    ownerRef: r.owner_ref as string,
+    activeNodeId: str(r.active_node_id),
+    currentCheckpointId: str(r.current_checkpoint_id),
+    budget: toBudgetSnapshot(r.budget_json),
+    allowedActions: toAllowedActions(r.allowed_actions_json),
+    recoveryPolicy: toRecoveryPolicy(r.recovery_policy_json),
+    replayScope: toReplayScope(r.replay_scope_json),
+    pendingApprovalCount: num(r.pending_approval_count) ?? 0,
+    createdAt: r.created_at as string,
+    updatedAt: r.updated_at as string,
+  };
+}
+
+function toNodeControl(r: Row): NodeControlStateRecord {
+  return {
+    runId: r.run_id as string,
+    nodeId: r.node_id as string,
+    state: r.state as NodeControlStateRecord["state"],
+    ownerKind: r.owner_kind as NodeControlStateRecord["ownerKind"],
+    ownerRef: r.owner_ref as string,
+    allowedActions: toAllowedActions(r.allowed_actions_json),
+    recoveryPolicy: toRecoveryPolicy(r.recovery_policy_json),
+    budget: toBudgetSnapshot(r.budget_json),
+    checkpointEligible: bool(r.checkpoint_eligible),
+    replayEligible: bool(r.replay_eligible),
+    partialRerunEligible: bool(r.partial_rerun_eligible),
+    approvalRequired: bool(r.approval_required),
+    approvalStatus: str(r.approval_status) as NodeControlStateRecord["approvalStatus"] | undefined,
+    createdAt: r.created_at as string,
+    updatedAt: r.updated_at as string,
+  };
+}
+
+function toControlAction(r: Row): ControlActionRecord {
+  return {
+    id: r.id as string,
+    runId: r.run_id as string,
+    nodeId: str(r.node_id),
+    actionType: r.action_type as string,
+    targetScope: r.target_scope as ControlActionRecord["targetScope"],
+    proposer: r.proposer as string,
+    ownerKind: r.owner_kind as ControlActionRecord["ownerKind"],
+    status: r.status as ControlActionRecord["status"],
+    sideEffectLevel: r.side_effect_level as ControlActionRecord["sideEffectLevel"],
+    approvalRequired: bool(r.approval_required),
+    payload: p<Record<string, unknown>>(r.payload_json) ?? undefined,
+    recoveryDecision: str(r.recovery_decision) as ControlActionRecord["recoveryDecision"] | undefined,
+    createdAt: r.created_at as string,
+    updatedAt: r.updated_at as string,
+  };
+}
+
+function toApprovalRequest(r: Row): ApprovalRequestRecord {
+  return {
+    id: r.id as string,
+    runId: r.run_id as string,
+    nodeId: str(r.node_id),
+    actionId: str(r.action_id),
+    riskLevel: r.risk_level as ApprovalRequestRecord["riskLevel"],
+    reason: r.reason as string,
+    requestedBy: r.requested_by as string,
+    status: r.status as ApprovalRequestRecord["status"],
+    approvedBy: str(r.approved_by),
+    approvedAt: str(r.approved_at),
+    createdAt: r.created_at as string,
+    updatedAt: r.updated_at as string,
   };
 }
 
@@ -272,6 +402,42 @@ const stmts = {
   insertStateTrace: db.prepare(`
     INSERT OR IGNORE INTO run_state_trace(id,run_id,node_id,execution_id,checkpoint,node_status,context_snapshot_json,metadata_json,created_at)
     VALUES(?,?,?,?,?,?,?,?,?)`),
+  upsertRunControl: db.prepare(`
+    INSERT INTO run_control_state(run_id,state,owner_kind,owner_ref,active_node_id,current_checkpoint_id,budget_json,
+      allowed_actions_json,recovery_policy_json,replay_scope_json,pending_approval_count,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(run_id) DO UPDATE SET
+      state=excluded.state, owner_kind=excluded.owner_kind, owner_ref=excluded.owner_ref,
+      active_node_id=excluded.active_node_id, current_checkpoint_id=excluded.current_checkpoint_id,
+      budget_json=excluded.budget_json, allowed_actions_json=excluded.allowed_actions_json,
+      recovery_policy_json=excluded.recovery_policy_json, replay_scope_json=excluded.replay_scope_json,
+      pending_approval_count=excluded.pending_approval_count, updated_at=excluded.updated_at`),
+  getRunControl: db.prepare(`SELECT * FROM run_control_state WHERE run_id=?`),
+  upsertNodeControl: db.prepare(`
+    INSERT INTO run_node_control_state(id,run_id,node_id,state,owner_kind,owner_ref,allowed_actions_json,
+      recovery_policy_json,budget_json,checkpoint_eligible,replay_eligible,partial_rerun_eligible,
+      approval_required,approval_status,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(run_id, node_id) DO UPDATE SET
+      state=excluded.state, owner_kind=excluded.owner_kind, owner_ref=excluded.owner_ref,
+      allowed_actions_json=excluded.allowed_actions_json, recovery_policy_json=excluded.recovery_policy_json,
+      budget_json=excluded.budget_json, checkpoint_eligible=excluded.checkpoint_eligible,
+      replay_eligible=excluded.replay_eligible, partial_rerun_eligible=excluded.partial_rerun_eligible,
+      approval_required=excluded.approval_required, approval_status=excluded.approval_status,
+      updated_at=excluded.updated_at`),
+  getNodeControls: db.prepare(`SELECT * FROM run_node_control_state WHERE run_id=? ORDER BY created_at, node_id`),
+  insertControlAction: db.prepare(`
+    INSERT OR REPLACE INTO run_control_action(id,run_id,node_id,action_type,target_scope,proposer,owner_kind,status,
+      side_effect_level,approval_required,payload_json,recovery_decision,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+  getControlActions: db.prepare(`SELECT * FROM run_control_action WHERE run_id=? ORDER BY created_at, id`),
+  upsertApprovalRequest: db.prepare(`
+    INSERT INTO run_approval_request(id,run_id,node_id,action_id,risk_level,reason,requested_by,status,approved_by,approved_at,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET
+      status=excluded.status, approved_by=excluded.approved_by, approved_at=excluded.approved_at,
+      updated_at=excluded.updated_at`),
+  getApprovalRequests: db.prepare(`SELECT * FROM run_approval_request WHERE run_id=? ORDER BY created_at, id`),
 };
 
 function dbNode(n: AgentNode) {
@@ -299,6 +465,49 @@ function dbCtx(c: AgentContext) {
     j(c.humanMessages), j(c.recentOutputs), c.latestSummary ?? null, c.updatedAt,
   );
 }
+function dbRunControl(control: RunControlStateRecord) {
+  stmts.upsertRunControl.run(
+    control.runId,
+    control.state,
+    control.ownerKind,
+    control.ownerRef,
+    control.activeNodeId ?? null,
+    control.currentCheckpointId ?? null,
+    j(control.budget),
+    j(control.allowedActions),
+    j(control.recoveryPolicy),
+    j(control.replayScope),
+    control.pendingApprovalCount,
+    control.createdAt,
+    control.updatedAt,
+  );
+}
+function dbNodeControl(control: NodeControlStateRecord) {
+  stmts.upsertNodeControl.run(
+    `${control.runId}:${control.nodeId}`,
+    control.runId,
+    control.nodeId,
+    control.state,
+    control.ownerKind,
+    control.ownerRef,
+    j(control.allowedActions),
+    j(control.recoveryPolicy),
+    j(control.budget),
+    control.checkpointEligible ? 1 : 0,
+    control.replayEligible ? 1 : 0,
+    control.partialRerunEligible ? 1 : 0,
+    control.approvalRequired ? 1 : 0,
+    control.approvalStatus ?? null,
+    control.createdAt,
+    control.updatedAt,
+  );
+}
+function stableControlSignature<T extends { updatedAt?: string }>(value: T) {
+  return JSON.stringify({
+    ...value,
+    updatedAt: undefined,
+  });
+}
 function dbEdge(e: WorkflowEdge) {
   stmts.insertEdge.run(e.id, e.runId, e.sourceNodeId, e.targetNodeId, e.type, e.condition ?? null, e.maxIterations ?? null, e.convergenceKeyword ?? null);
 }
@@ -313,6 +522,10 @@ class MemoryStore {
   private definitions = new Map<string, AgentDefinition[]>();
   private contexts = new Map<string, AgentContext[]>();
   private humanMessages = new Map<string, HumanMessage[]>();
+  private runControl = new Map<string, RunControlStateRecord>();
+  private nodeControl = new Map<string, NodeControlStateRecord[]>();
+  private controlActions = new Map<string, ControlActionRecord[]>();
+  private approvalRequests = new Map<string, ApprovalRequestRecord[]>();
   private dbAttempted = new Set<string>();
 
   private tryLoadFromDb(runId: string): void {
@@ -327,6 +540,13 @@ class MemoryStore {
     this.definitions.set(runId, (db.prepare("SELECT * FROM run_agent_definition WHERE run_id=?").all(runId) as Row[]).map(toDefinition));
     this.contexts.set(runId, (db.prepare("SELECT * FROM run_agent_context WHERE run_id=?").all(runId) as Row[]).map(toContext));
     this.humanMessages.set(runId, (db.prepare("SELECT * FROM run_human_message WHERE run_id=? ORDER BY rowid").all(runId) as Row[]).map(toHumanMessage));
+    const runControl = stmts.getRunControl.get(runId) as Row | undefined;
+    if (runControl) {
+      this.runControl.set(runId, toRunControl(runControl));
+    }
+    this.nodeControl.set(runId, (stmts.getNodeControls.all(runId) as Row[]).map(toNodeControl));
+    this.controlActions.set(runId, (stmts.getControlActions.all(runId) as Row[]).map(toControlAction));
+    this.approvalRequests.set(runId, (stmts.getApprovalRequests.all(runId) as Row[]).map(toApprovalRequest));
   }
 
   private ensureLoaded(runId: string): void {
@@ -347,6 +567,14 @@ class MemoryStore {
     this.definitions.set(runId, snapshot.agentDefinitions);
     this.contexts.set(runId, snapshot.agentContexts);
     this.humanMessages.set(runId, snapshot.humanMessages);
+    if (snapshot.controlPlane?.run) {
+      this.runControl.set(runId, snapshot.controlPlane.run);
+    } else {
+      this.runControl.delete(runId);
+    }
+    this.nodeControl.set(runId, snapshot.controlPlane?.nodes ?? this.nodeControl.get(runId) ?? []);
+    this.controlActions.set(runId, snapshot.controlPlane?.actions ?? this.controlActions.get(runId) ?? []);
+    this.approvalRequests.set(runId, snapshot.controlPlane?.approvals ?? this.approvalRequests.get(runId) ?? []);
 
     db.exec("BEGIN");
     try {
@@ -373,6 +601,23 @@ class MemoryStore {
       for (const e of snapshot.edges) dbEdge(e);
       for (const d of snapshot.agentDefinitions) dbDef(d);
       for (const c of snapshot.agentContexts) dbCtx(c);
+      if (snapshot.controlPlane?.run) dbRunControl(snapshot.controlPlane.run);
+      for (const control of snapshot.controlPlane?.nodes ?? []) dbNodeControl(control);
+      for (const action of snapshot.controlPlane?.actions ?? []) {
+        stmts.insertControlAction.run(
+          action.id, action.runId, action.nodeId ?? null, action.actionType, action.targetScope,
+          action.proposer, action.ownerKind, action.status, action.sideEffectLevel,
+          action.approvalRequired ? 1 : 0, j(action.payload ?? null), action.recoveryDecision ?? null,
+          action.createdAt, action.updatedAt,
+        );
+      }
+      for (const approval of snapshot.controlPlane?.approvals ?? []) {
+        stmts.upsertApprovalRequest.run(
+          approval.id, approval.runId, approval.nodeId ?? null, approval.actionId ?? null,
+          approval.riskLevel, approval.reason, approval.requestedBy, approval.status,
+          approval.approvedBy ?? null, approval.approvedAt ?? null, approval.createdAt, approval.updatedAt,
+        );
+      }
       db.exec("COMMIT");
     } catch (err) {
       db.exec("ROLLBACK");
@@ -538,6 +783,101 @@ class MemoryStore {
       agentDefinitions: this.getAgentDefinitions(runId),
       agentContexts: this.getAgentContexts(runId),
       humanMessages: this.getHumanMessages(runId),
+      controlPlane: this.getControlPlane(runId),
+    };
+  }
+
+  getRunControl(runId: string): RunControlStateRecord | null {
+    this.ensureLoaded(runId);
+    return this.runControl.get(runId) ?? null;
+  }
+
+  upsertRunControl(control: RunControlStateRecord) {
+    const current = this.runControl.get(control.runId);
+    if (current && stableControlSignature(current) === stableControlSignature(control)) {
+      return;
+    }
+    this.runControl.set(control.runId, control);
+    dbRunControl(control);
+  }
+
+  updateRunControl(runId: string, updater: (current: RunControlStateRecord | null) => RunControlStateRecord) {
+    const updated = updater(this.getRunControl(runId));
+    const current = this.runControl.get(runId);
+    if (current && stableControlSignature(current) === stableControlSignature(updated)) {
+      return;
+    }
+    this.runControl.set(runId, updated);
+    dbRunControl(updated);
+  }
+
+  getNodeControls(runId: string): NodeControlStateRecord[] {
+    this.ensureLoaded(runId);
+    return this.nodeControl.get(runId) ?? [];
+  }
+
+  getNodeControl(runId: string, nodeId: string): NodeControlStateRecord | null {
+    return this.getNodeControls(runId).find((item) => item.nodeId === nodeId) ?? null;
+  }
+
+  replaceNodeControls(runId: string, controls: NodeControlStateRecord[]) {
+    this.nodeControl.set(runId, controls);
+    for (const control of controls) dbNodeControl(control);
+  }
+
+  upsertNodeControl(control: NodeControlStateRecord) {
+    const current = this.getNodeControl(control.runId, control.nodeId);
+    if (current && stableControlSignature(current) === stableControlSignature(control)) {
+      return;
+    }
+    const next = this.getNodeControls(control.runId).filter((item) => item.nodeId !== control.nodeId);
+    next.push(control);
+    this.nodeControl.set(control.runId, next);
+    dbNodeControl(control);
+  }
+
+  listControlActions(runId: string): ControlActionRecord[] {
+    this.ensureLoaded(runId);
+    return this.controlActions.get(runId) ?? [];
+  }
+
+  appendControlAction(runId: string, action: ControlActionRecord) {
+    this.controlActions.set(runId, [...this.listControlActions(runId), action]);
+    stmts.insertControlAction.run(
+      action.id, action.runId, action.nodeId ?? null, action.actionType, action.targetScope,
+      action.proposer, action.ownerKind, action.status, action.sideEffectLevel,
+      action.approvalRequired ? 1 : 0, j(action.payload ?? null), action.recoveryDecision ?? null,
+      action.createdAt, action.updatedAt,
+    );
+  }
+
+  listApprovalRequests(runId: string): ApprovalRequestRecord[] {
+    this.ensureLoaded(runId);
+    return this.approvalRequests.get(runId) ?? [];
+  }
+
+  upsertApprovalRequest(request: ApprovalRequestRecord) {
+    const current = this.listApprovalRequests(request.runId).find((item) => item.id === request.id);
+    if (current && stableControlSignature(current) === stableControlSignature(request)) {
+      return;
+    }
+    const next = this.listApprovalRequests(request.runId).filter((item) => item.id !== request.id);
+    next.push(request);
+    this.approvalRequests.set(request.runId, next);
+    stmts.upsertApprovalRequest.run(
+      request.id, request.runId, request.nodeId ?? null, request.actionId ?? null,
+      request.riskLevel, request.reason, request.requestedBy, request.status,
+      request.approvedBy ?? null, request.approvedAt ?? null, request.createdAt, request.updatedAt,
+    );
+  }
+
+  getControlPlane(runId: string): RunControlPlaneSnapshot {
+    this.ensureLoaded(runId);
+    return {
+      run: this.runControl.get(runId) ?? null,
+      nodes: this.nodeControl.get(runId) ?? [],
+      actions: this.controlActions.get(runId) ?? [],
+      approvals: this.approvalRequests.get(runId) ?? [],
     };
   }
 
@@ -709,6 +1049,10 @@ class MemoryStore {
     this.definitions.clear();
     this.contexts.clear();
     this.humanMessages.clear();
+    this.runControl.clear();
+    this.nodeControl.clear();
+    this.controlActions.clear();
+    this.approvalRequests.clear();
     this.dbAttempted.clear();
   }
 }

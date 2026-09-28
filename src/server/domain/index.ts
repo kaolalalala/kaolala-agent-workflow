@@ -12,4 +12,5 @@ export * from "./agent-node-config";
 export * from "./secret-credential";
 export * from "./agent-document";
 export * from "./workflow-definition";
+export * from "./control-plane";
 export * from "./trace";

@@ -88,21 +88,35 @@ export function buildDelegationBrief(
   const relevantSkills = selectMetaAgentSkillResources(skillQuery, skillLimit);
   // Resolve artifact summaries via depends_on first (authoritative runtime data flow),
   // then fall back to input_refs only when no depends_on artifacts are found.
+  // A dependency todo may produce multiple artifacts across retries; keep the last
+  // 2 unique-path artifacts per dependency so the subagent sees both the primary
+  // result and any supplementary outputs from retries.
   const depSet = new Set(todo.depends_on);
   let artifactSummaries: Array<{ id: string; path: string; type: string; summary: string }> = [];
   if (depSet.size > 0) {
-    const latestByDep = new Map<string, (typeof state.artifacts)[0]>();
+    const byDep = new Map<string, (typeof state.artifacts)>();
     for (const artifact of state.artifacts) {
       if (depSet.has(artifact.related_todo)) {
-        latestByDep.set(artifact.related_todo, artifact);
+        const list = byDep.get(artifact.related_todo) ?? [];
+        list.push(artifact);
+        byDep.set(artifact.related_todo, list);
       }
     }
-    artifactSummaries = [...latestByDep.values()].map((artifact) => ({
-      id: artifact.id,
-      path: artifact.path,
-      type: artifact.type,
-      summary: artifact.summary,
-    }));
+    for (const list of byDep.values()) {
+      const byPath = new Map<string, (typeof state.artifacts)[0]>();
+      for (const artifact of list) {
+        byPath.set(artifact.path, artifact);
+      }
+      const deduped = [...byPath.values()].slice(-2);
+      for (const artifact of deduped) {
+        artifactSummaries.push({
+          id: artifact.id,
+          path: artifact.path,
+          type: artifact.type,
+          summary: artifact.summary,
+        });
+      }
+    }
   }
   if (artifactSummaries.length === 0 && todo.input_refs.length > 0) {
     const refSet = new Set(todo.input_refs);
@@ -152,9 +166,13 @@ export function buildDelegationBrief(
     id: item.id,
     name: item.name,
     description: item.description,
-    // On retries skip guide_content — the subagent already received it on the first attempt.
-    // The retry_analysis directive carries the actionable instructions instead.
-    guide_content: isRetry ? undefined : toSkillGuideExcerpt(item.guideContent),
+    // On retries keep a short guide excerpt so the subagent still knows which skill to call
+    // and when it is mandatory. The full guide is truncated to save tokens; the retry_analysis
+    // directive carries the specific improvement instructions.
+    guide_content: item.guideContent
+      ? (isRetry ? item.guideContent.slice(0, 400) : toSkillGuideExcerpt(item.guideContent))
+      : undefined,
+    runtime_profile_id: item.runtimeProfileId,
     output_description: item.outputDescription,
   }));
 

@@ -21,6 +21,7 @@ import { workspaceService } from "@/server/workspace/workspace-service";
 import { localProjectService } from "@/server/workspace/local-project-service";
 import { makeId, nowIso } from "@/lib/utils";
 import { evaluationService } from "@/server/evaluation/evaluation-service";
+import { durableScheduler } from "@/server/runtime/durable-scheduler";
 
 function ensureRun(runId: string) {
   const snapshot = memoryStore.getRunSnapshot(runId);
@@ -28,6 +29,155 @@ function ensureRun(runId: string) {
     throw new Error("运行不存在");
   }
   return snapshot;
+}
+
+function deriveRunControlState(status: "running" | "success" | "failed") {
+  if (status === "success") return "completed" as const;
+  if (status === "failed") return "failed" as const;
+  return "running" as const;
+}
+
+function deriveNodeControlState(status: "running" | "success" | "failed") {
+  if (status === "success") return "completed" as const;
+  if (status === "failed") return "failed" as const;
+  return "running" as const;
+}
+
+function buildControlPlaneView(runId: string, detail: NonNullable<ReturnType<typeof configService.getProjectRunDetail>>) {
+  const snapshot = memoryStore.getRunSnapshot(runId);
+  const control = memoryStore.getControlPlane(runId);
+  const schedule = durableScheduler.getScheduleState(runId);
+  const checkpoints = durableScheduler.getCheckpoints(runId);
+  const nodeMeta = new Map((snapshot?.nodes ?? []).map((node) => [node.id, node]));
+  const pendingApprovals = control.approvals.filter((item) => item.status === "pending").length;
+  const lastCheckpointId = checkpoints.at(-1)?.id;
+  const activeNodeId =
+    control.run?.activeNodeId
+    ?? detail.nodeExecutions.find((item) => item.status === "running")?.nodeId
+    ?? undefined;
+
+  const run = control.run ?? {
+    runId,
+    state: deriveRunControlState(detail.status),
+    ownerKind: activeNodeId ? "worker" as const : "runtime" as const,
+    ownerRef: activeNodeId ?? "runtime-engine",
+    activeNodeId,
+    currentCheckpointId: lastCheckpointId,
+    budget: {
+      maxSteps: detail.nodeExecutions.length || undefined,
+      usedSteps: detail.nodeExecutions.filter((item) => item.status === "running" || item.status === "success" || item.status === "failed").length,
+      maxTokens: undefined,
+      usedTokens: detail.totalTokens ?? 0,
+      maxCostUsd: undefined,
+      usedCostUsd: 0,
+      maxWallMs: undefined,
+      usedWallMs: detail.durationMs ?? 0,
+    },
+    allowedActions: [],
+    recoveryPolicy: { onFailure: "fallback" as const, maxRetries: 1, fallbackTarget: "human_review" },
+    replayScope: detail.replayHints,
+    pendingApprovalCount: pendingApprovals,
+    createdAt: detail.startedAt,
+    updatedAt: detail.updatedAt,
+  };
+
+  const existingNodeControls = new Map(control.nodes.map((item) => [item.nodeId, item]));
+  const nodeControls = detail.nodeExecutions.map((node) => {
+    const existing = existingNodeControls.get(node.nodeId);
+    return existing ?? {
+      runId,
+      nodeId: node.nodeId,
+      state: deriveNodeControlState(node.status),
+      ownerKind: node.role === "planner" ? "planner" as const : "worker" as const,
+      ownerRef: node.nodeId,
+      allowedActions:
+        node.status === "failed"
+          ? [
+              { actionType: "retry_node", label: "重试节点", source: "runtime" as const, enabled: true },
+              { actionType: "reroute_to_review", label: "改道到审查节点", source: "policy" as const, enabled: true },
+            ]
+          : node.status === "success"
+            ? [
+                { actionType: "rerun_node", label: "重跑当前节点", source: "runtime" as const, enabled: true },
+                { actionType: "rerun_downstream", label: "重跑下游节点", source: "runtime" as const, enabled: true },
+              ]
+            : [
+                { actionType: "continue_execution", label: "继续执行", source: "runtime" as const, enabled: true },
+              ],
+      recoveryPolicy: { onFailure: "retry" as const, maxRetries: 2, fallbackTarget: "human_review" },
+      budget: {
+        maxSteps: 1,
+        usedSteps: node.status === "running" || node.status === "success" || node.status === "failed" ? 1 : 0,
+        maxTokens: undefined,
+        usedTokens: node.totalTokens ?? 0,
+        maxCostUsd: undefined,
+        usedCostUsd: 0,
+        maxWallMs: undefined,
+        usedWallMs: node.durationMs ?? 0,
+      },
+      checkpointEligible: (nodeMeta.get(node.nodeId)?.role ?? "").toString() !== "input",
+      replayEligible: node.status === "success" || node.status === "failed",
+      partialRerunEligible: true,
+      approvalRequired: false,
+      approvalStatus: undefined,
+      createdAt: node.startedAt ?? detail.startedAt,
+      updatedAt: node.finishedAt ?? detail.updatedAt,
+    };
+  }).map((item) => ({
+    ...item,
+    name: nodeMeta.get(item.nodeId)?.name ?? detail.nodeExecutions.find((node) => node.nodeId === item.nodeId)?.name ?? item.nodeId,
+    role: nodeMeta.get(item.nodeId)?.role ?? detail.nodeExecutions.find((node) => node.nodeId === item.nodeId)?.role ?? "worker",
+  }));
+
+  const recentActions = control.actions
+    .slice(-20)
+    .reverse()
+    .map((action) => ({
+      ...action,
+      nodeName: action.nodeId ? (nodeMeta.get(action.nodeId)?.name ?? action.nodeId) : undefined,
+    }));
+
+  return {
+    run,
+    schedule: schedule
+      ? {
+          status: schedule.status,
+          currentWaveIndex: schedule.currentWaveIndex,
+          rerunMode: schedule.rerunMode,
+          rerunStartNodeId: schedule.rerunStartNodeId,
+        }
+      : null,
+    checkpoints: checkpoints.map((checkpoint) => ({
+      ...checkpoint,
+      nodeName: nodeMeta.get(checkpoint.nodeId)?.name ?? checkpoint.nodeId,
+    })),
+    nodeControls,
+    recentActions,
+    approvals: control.approvals.map((approval) => ({
+      ...approval,
+      nodeName: approval.nodeId ? (nodeMeta.get(approval.nodeId)?.name ?? approval.nodeId) : undefined,
+    })),
+  };
+}
+
+function toCredentialSummary(item: {
+  id: string;
+  provider: string;
+  label: string;
+  createdAt: string;
+  updatedAt: string;
+}) {
+  const apiKey = configService.resolveCredentialApiKey(item.id) ?? "";
+  const trimmed = apiKey.trim();
+  return {
+    id: item.id,
+    provider: item.provider,
+    label: item.label,
+    hasApiKey: trimmed.length > 0,
+    apiKeyPreview: trimmed.length > 4 ? `***${trimmed.slice(-4)}` : "",
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+  };
 }
 
 type RunListSort = "time_desc" | "time_asc" | "duration_desc" | "duration_asc" | "tokens_desc" | "tokens_asc";
@@ -199,13 +349,7 @@ export const runService = {
   },
   getWorkspaceConfig() {
     const workspace = configService.ensureWorkspaceConfig();
-    const credentials = configService.listCredentials().map((item) => ({
-      id: item.id,
-      provider: item.provider,
-      label: item.label,
-      createdAt: item.createdAt,
-      updatedAt: item.updatedAt,
-    }));
+    const credentials = configService.listCredentials().map(toCredentialSummary);
     return { workspace, credentials };
   },
   updateWorkspaceConfig(payload: Partial<WorkspaceConfig>) {
@@ -213,13 +357,7 @@ export const runService = {
     return { workspace };
   },
   listCredentials() {
-    const credentials = configService.listCredentials().map((item) => ({
-      id: item.id,
-      provider: item.provider,
-      label: item.label,
-      createdAt: item.createdAt,
-      updatedAt: item.updatedAt,
-    }));
+    const credentials = configService.listCredentials().map(toCredentialSummary);
     return { credentials };
   },
   createCredential(payload: { provider?: string; label?: string; apiKey?: string }) {
@@ -567,6 +705,9 @@ export const runService = {
     name?: string;
     scriptId?: string;
     description?: string;
+    guideContent?: string;
+    planningHint?: string;
+    runtimeProfileId?: string;
     parameterMapping?: Record<string, string>;
     outputDescription?: string;
     enabled?: boolean;
@@ -579,6 +720,9 @@ export const runService = {
         name: payload.name.trim(),
         scriptId: payload.scriptId.trim(),
         description: payload.description,
+        guideContent: payload.guideContent,
+        planningHint: payload.planningHint,
+        runtimeProfileId: payload.runtimeProfileId,
         parameterMapping: payload.parameterMapping,
         outputDescription: payload.outputDescription,
         enabled: payload.enabled,
@@ -590,6 +734,9 @@ export const runService = {
     payload: Partial<{
       name: string;
       description: string;
+      guideContent: string;
+      planningHint: string;
+      runtimeProfileId: string;
       scriptId: string;
       parameterMapping: Record<string, string>;
       outputDescription: string;
@@ -760,7 +907,12 @@ export const runService = {
     if (!detail) {
       throw new Error("运行记录不存在");
     }
-    return { run: detail };
+    return {
+      run: {
+        ...detail,
+        controlPlane: buildControlPlaneView(runId, detail),
+      },
+    };
   },
   listProjectFiles(projectId: string, limit?: number) {
     return { files: configService.listProjectFiles(projectId, limit) };

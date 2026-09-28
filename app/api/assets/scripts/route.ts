@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { runService } from "@/server/api/run-service";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 function statusOf(message: string) {
   if (message.includes("不存在")) return 404;
   if (message.includes("不能为空") || message.includes("无效")) return 400;
@@ -11,7 +14,11 @@ function statusOf(message: string) {
 
 export async function GET() {
   try {
-    return NextResponse.json(runService.listScriptAssets());
+    return NextResponse.json(runService.listScriptAssets(), {
+      headers: {
+        "Cache-Control": "no-store, max-age=0",
+      },
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "获取脚本资产失败";
     return NextResponse.json({ error: message }, { status: statusOf(message) });

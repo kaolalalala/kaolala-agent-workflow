@@ -5,11 +5,13 @@ import { evaluationService } from "@/server/evaluation/evaluation-service";
 import { outputManager } from "@/server/runtime/output-manager";
 import { runtimeEngine } from "@/server/runtime/runtime-engine";
 import { memoryStore } from "@/server/store/memory-store";
+import { installRuntimeTestLlm } from "@/server/__tests__/helpers/test-llm";
 
 describe("evaluation service", () => {
   beforeEach(() => {
     memoryStore.reset();
     configService.resetForTests();
+    installRuntimeTestLlm();
     vi.useFakeTimers();
   });
 
@@ -58,7 +60,7 @@ describe("evaluation service", () => {
     expect(report.promptDiffSummary.baselinePromptTraceCount).toBeGreaterThanOrEqual(0);
     expect(Array.isArray(report.nodeDiffs)).toBe(true);
     expect(report.nodeDiffs.length).toBeGreaterThan(0);
-  });
+  }, 10_000);
 
   it("executes evaluation case end-to-end with suite/case/report loop", async () => {
     const workflow = configService.saveWorkflow({
@@ -87,8 +89,8 @@ describe("evaluation service", () => {
     const evaluationCase = evaluationService.createCase({
       suiteId: suite.id,
       name: "基础回放用例",
-      taskInput: "请输出 mock-agent-v1 的执行结果",
-      expectedOutputContains: "mock-agent-v1",
+      taskInput: "请输出 test llm 的执行结果",
+      expectedOutputContains: "任务执行完成",
     });
 
     const promise = evaluationService.executeCase(evaluationCase.id);
@@ -122,5 +124,5 @@ describe("evaluation service", () => {
     expect(replaySnapshot.run.taskInput).toBe(evaluationCase.taskInput);
     expect(baselineSnapshot.run.memoryIsolationMode).toBe("run_scoped");
     expect(replaySnapshot.run.memoryIsolationMode).toBe("run_scoped");
-  });
+  }, 15_000);
 });

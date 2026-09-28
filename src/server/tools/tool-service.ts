@@ -100,6 +100,43 @@ const DEFAULT_TOOL_DEFINITIONS: Array<{
   },
   {
     pluginId: "plugin_core_basics",
+    toolId: "tool_arxiv_search_download_batch",
+    name: "arXiv Search Download Batch",
+    description: "Search arXiv for a paper batch and download PDF files into the run output directory.",
+    category: "automation",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "arXiv search query" },
+        startIndex: { type: "integer", minimum: 0, maximum: 200, default: 0 },
+        maxResults: { type: "integer", minimum: 1, maximum: 20, default: 10 },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        startIndex: { type: "integer" },
+        requestedCount: { type: "integer" },
+        downloadedCount: { type: "integer" },
+        outputDir: { type: "string" },
+        manifestPath: { type: "string" },
+        papers: { type: "array" },
+        failures: { type: "array" },
+      },
+    },
+    sourceType: "local_script",
+    sourceConfig: {
+      command: "node ./scripts/tools/arxiv-search-download-batch.mjs",
+    },
+    authRequirements: { type: "none", required: false },
+    policy: { timeoutMs: 120000, maxRetries: 1, retryBackoffMs: 750 },
+    enabled: true,
+  },
+  {
+    pluginId: "plugin_core_basics",
     toolId: "tool_save_local_report",
     name: "Save Local Report",
     description: "Save markdown report to a local directory.",
@@ -246,11 +283,13 @@ const DEFAULT_ROLE_BINDINGS: Array<{
   priority: number;
 }> = [
   { scopeType: "agent_role", scopeId: "worker", toolId: "tool_agent_os_latest_search", enabled: true, priority: 220 },
+  { scopeType: "agent_role", scopeId: "worker", toolId: "tool_arxiv_search_download_batch", enabled: true, priority: 210 },
   { scopeType: "agent_role", scopeId: "worker", toolId: "tool_save_local_report", enabled: true, priority: 180 },
   { scopeType: "agent_role", scopeId: "worker", toolId: "tool_text_stats", enabled: true, priority: 150 },
   { scopeType: "agent_role", scopeId: "worker", toolId: "tool_json_extract", enabled: true, priority: 140 },
   { scopeType: "agent_role", scopeId: "worker", toolId: "tool_get_current_time", enabled: true, priority: 130 },
   { scopeType: "agent_role", scopeId: "research", toolId: "tool_agent_os_latest_search", enabled: true, priority: 240 },
+  { scopeType: "agent_role", scopeId: "research", toolId: "tool_arxiv_search_download_batch", enabled: true, priority: 230 },
   { scopeType: "agent_role", scopeId: "research", toolId: "tool_save_local_report", enabled: true, priority: 180 },
   { scopeType: "agent_role", scopeId: "research", toolId: "tool_http_get_json", enabled: true, priority: 170 },
   { scopeType: "agent_role", scopeId: "research", toolId: "tool_get_current_time", enabled: true, priority: 120 },
@@ -517,6 +556,8 @@ function ensureDefaultToolingData() {
     );
   }
 }
+
+ensureDefaultToolingData();
 
 export const toolService = {
   ensurePlatformBootstrap() {

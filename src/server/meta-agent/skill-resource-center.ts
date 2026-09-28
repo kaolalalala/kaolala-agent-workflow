@@ -7,6 +7,9 @@ export interface MetaAgentSkillResource {
   name: string;
   description?: string;
   guideContent?: string;
+  /** Planner-facing hint: partitioning strategy, parallelism constraints, per-call capacity. */
+  planningHint?: string;
+  runtimeProfileId?: string;
   outputDescription?: string;
   parameterSchema: Record<string, unknown>;
   localPath: string;
@@ -102,6 +105,8 @@ export function listMetaAgentSkillResources(limit = 12): MetaAgentSkillResource[
       name: skill.name,
       description: skill.description ?? undefined,
       guideContent: skill.guideContent ?? undefined,
+      planningHint: skill.planningHint ?? undefined,
+      runtimeProfileId: skill.runtimeProfileId ?? undefined,
       outputDescription: skill.outputDescription ?? undefined,
       parameterSchema: script.parameterSchema,
       localPath: script.localPath,

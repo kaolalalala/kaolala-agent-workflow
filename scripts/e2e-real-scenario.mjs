@@ -11,7 +11,6 @@ const baseUrl = String(args.baseUrl || "http://127.0.0.1:3010").replace(/\/$/, "
 const timeoutMs = Number(args.timeoutMs || 180000);
 const pollMs = Number(args.pollMs || 1200);
 const savePath = String(args.savePath || "./output/agent-os-latest.md");
-const autoOnly = String(args.autoOnly || "false") === "true";
 
 const instruction =
   "给我从网上找出最新的关于agent os的信息（新闻/论文），然后总结好存到本地 output 目录。";
@@ -79,9 +78,9 @@ function contextByNode(snapshot, nodeId) {
 }
 
 function readWorkspaceMode(workspacePayload) {
-  const provider = String(workspacePayload?.workspace?.defaultProvider || "mock").toLowerCase();
+  const provider = String(workspacePayload?.workspace?.defaultProvider || "").toLowerCase();
   const model = String(workspacePayload?.workspace?.defaultModel || "");
-  return { provider, model, isMock: !provider || provider === "mock" };
+  return { provider, model, isConfigured: Boolean(provider) };
 }
 
 function buildSummary(snapshot, mode, beforeFileMtimeMs) {
@@ -181,7 +180,7 @@ function buildSummary(snapshot, mode, beforeFileMtimeMs) {
   return report;
 }
 
-async function runScenario({ modeLabel, mockAssist }) {
+async function runScenario({ modeLabel }) {
   const beforeFileMtimeMs = fileMtimeMs(savePath);
 
   const created = await requestJson("/api/runs", {
@@ -206,38 +205,10 @@ async function runScenario({ modeLabel, mockAssist }) {
     body: JSON.stringify({ content: instruction }),
   });
 
-  if (mockAssist) {
-    await requestJson(`/api/runs/${runId}/nodes/${workerNode.id}/human-message`, {
-      method: "POST",
-      body: JSON.stringify({
-        content: '/tool tool_agent_os_latest_search {"query":"agent os latest news papers","maxNews":6,"maxPapers":6}',
-      }),
-    });
-    await requestJson(`/api/runs/${runId}/nodes/${sumNode.id}/human-message`, {
-      method: "POST",
-      body: JSON.stringify({
-        content: `/tool tool_save_local_report {"path":"${savePath.replace(/\\/g, "\\\\")}"}`,
-      }),
-    });
-  }
-
   await requestJson(`/api/runs/${runId}/start`, { method: "POST" });
   const snapshotDone = await waitRunDone(runId);
   const mode = { label: modeLabel };
   return buildSummary(snapshotDone, mode, beforeFileMtimeMs);
-}
-
-async function setWorkspaceToMock() {
-  return requestJson("/api/workspace/config", {
-    method: "PUT",
-    body: JSON.stringify({
-      defaultProvider: "mock",
-      defaultModel: "mock-agent-v1",
-      defaultBaseUrl: "",
-      defaultCredentialId: "",
-      defaultTemperature: 0.2,
-    }),
-  });
 }
 
 async function restoreWorkspace(original) {
@@ -259,39 +230,20 @@ async function main() {
   const originalWorkspace = workspacePayload.workspace;
   const mode = readWorkspaceMode(workspacePayload);
 
-  const attempts = [];
-  let restored = false;
+  if (!mode.isConfigured) {
+    throw new Error("Workspace LLM is not configured. Configure a real provider before running e2e-real-scenario.");
+  }
+
   try {
-    const attempt1 = await runScenario({
+    const attempt = await runScenario({
       modeLabel: `workspace:${mode.provider}/${mode.model || "-"}`,
-      mockAssist: mode.isMock,
     });
-    attempts.push(attempt1);
-
-    if (attempt1.ok || autoOnly) {
-      process.stdout.write(`${JSON.stringify({ ok: attempt1.ok, attempts }, null, 2)}\n`);
-      if (!attempt1.ok) {
-        process.exitCode = 2;
-      }
-      return;
-    }
-
-    await setWorkspaceToMock();
-    const fallback = await runScenario({
-      modeLabel: "fallback:mock+tool-assist",
-      mockAssist: true,
-    });
-    attempts.push(fallback);
-
-    process.stdout.write(`${JSON.stringify({ ok: fallback.ok, attempts }, null, 2)}\n`);
-    if (!fallback.ok) {
+    process.stdout.write(`${JSON.stringify({ ok: attempt.ok, attempts: [attempt] }, null, 2)}\n`);
+    if (!attempt.ok) {
       process.exitCode = 2;
     }
   } finally {
-    if (!restored) {
-      await restoreWorkspace(originalWorkspace).catch(() => {});
-      restored = true;
-    }
+    await restoreWorkspace(originalWorkspace).catch(() => {});
   }
 }
 

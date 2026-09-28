@@ -84,7 +84,7 @@ description: 当任务需要从 arXiv 搜索、分批下载论文 PDF、生成 m
           items: { type: "string" },
           description: "待合并的 manifest 路径列表。优先传入 manifest.json，也可传 manifest.md。",
         },
-        requiredCount: { type: "integer", minimum: 1, description: "期望最终唯一论文数量，例如 20。" },
+        requiredCount: { type: "integer", minimum: 1, description: "期望最终唯一论文数量（如不指定则使用所有已下载论文）。" },
         query: { type: "string", description: "可选检索词。若合并后数量不足，可用它指导继续补充下载。" },
         sourceDirs: {
           type: "array",
@@ -111,22 +111,23 @@ description: 当任务需要汇总多个论文下载批次、按 arXiv ID 去重
 ## 何时使用
 
 - 当多个子 Agent 已经分别下载了论文，并各自生成 manifest。
-- 当任务要求“最终交付 20 篇”“去重后汇总”“给出统一清单”时。
+- 当任务要求去重后汇总、给出统一清单时。
 - 当你需要确认最终唯一论文数量是否满足目标要求时。
 
 ## 输入参数
 
 - \`manifestPaths\`：优先使用。传入一个或多个批次 manifest 路径。
 - \`sourceDirs\`：可选。如果只知道目录，也可以传目录，让脚本递归发现 manifest.json。
+- \`requiredCount\`：可选。目标论文数量，由用户目标决定，不要硬编码固定数值。
 - \`outputLabel\`：可选。用于区分本次合并结果目录。
 
 ## 推荐做法
 
 1. 优先收集每个下载批次产出的 \`manifest.json\` 路径。
 2. 把所有批次路径一起传给本技能。
-3. 同时传入 \`requiredCount\`，让脚本明确知道最终目标数量。
+3. 如果用户目标有明确数量，传入 \`requiredCount\`；否则省略，脚本会汇总全部已有论文。
 4. 合并完成后，检查 \`mergedCount\` 和 \`missingCount\`。
-5. 如果 \`missingCount > 0\`，优先继续调用“arXiv 论文下载”技能补齐缺口，再重新调用本技能，而不是伪造结果。
+5. 如果 \`missingCount > 0\`，优先继续调用”arXiv 论文下载”技能补齐缺口，再重新调用本技能，而不是伪造结果。
 
 ## 输出重点
 
@@ -134,8 +135,7 @@ description: 当任务需要汇总多个论文下载批次、按 arXiv ID 去重
 - \`reportPath\`：最终合并后的 Markdown 摘要路径。
 - \`mergedCount\`：去重后的唯一论文数量。
 - \`duplicateCount\`：检测到的重复论文数量。
-- \`missingCount\`：距离目标数量还差多少篇。
-- \`nextSuggestedStartIndex\`：建议下一次继续搜索下载时使用的起始偏移。
+- \`missingCount\`：距离目标数量还差多少篇（目标未设定时为 0）。
 - \`papers\`：最终交付论文列表，含标题、arXiv ID、来源链接、本地路径。
 `,
     outputDescription: "返回合并后 JSON/Markdown 清单路径、唯一论文数量、重复数量、缺口提示和最终论文列表。",
@@ -143,7 +143,7 @@ description: 当任务需要汇总多个论文下载批次、按 arXiv ID 去重
   {
     scriptId: "asset_script_paper_delivery_package_skill",
     scriptName: "论文交付打包脚本",
-    scriptDescription: "读取最终论文 manifest，整理 20 篇交付清单，并输出最终交付报告。",
+    scriptDescription: "读取最终论文 manifest，整理交付清单，并输出最终交付报告。",
     runCommand: "node paper-delivery-package-skill.mjs",
     parameterSchema: {
       type: "object",
@@ -151,13 +151,13 @@ description: 当任务需要汇总多个论文下载批次、按 arXiv ID 去重
       required: ["manifestPath"],
       properties: {
         manifestPath: { type: "string", description: "合并后的论文 manifest.json 路径。" },
-        requiredCount: { type: "integer", minimum: 1, description: "最终需要交付的论文数量，例如 20。" },
+        requiredCount: { type: "integer", minimum: 1, description: "最终需要交付的论文数量（如不指定则使用 manifest 中全部论文）。" },
         outputLabel: { type: "string", description: "可选输出标签，用于区分本次交付目录。" },
       },
     },
     skillId: "asset_skill_paper_delivery_package",
     skillName: "论文交付打包",
-    skillDescription: "当任务需要基于最终 manifest 生成交付清单、列出 20 篇论文文件路径、输出最终交付报告时使用此技能。",
+    skillDescription: "当任务需要基于最终 manifest 生成交付清单、列出论文文件路径、输出最终交付报告时使用此技能。",
     guideContent: `---
 name: 论文交付打包
 description: 当任务需要把已经准备好的论文结果整理成最终交付包、交付清单和报告时使用此技能。
@@ -202,13 +202,13 @@ description: 当任务需要把已经准备好的论文结果整理成最终交�
       required: ["manifestPath"],
       properties: {
         manifestPath: { type: "string", description: "待校验的论文 manifest.json 路径。" },
-        requiredCount: { type: "integer", minimum: 1, description: "需要校验的论文数量，例如 20。" },
+        requiredCount: { type: "integer", minimum: 1, description: "需要校验的论文数量（如不指定则校验 manifest 中全部论文）。" },
         outputLabel: { type: "string", description: "可选输出标签，用于区分本次校验目录。" },
       },
     },
     skillId: "asset_skill_paper_integrity_verify",
     skillName: "论文完整性校验",
-    skillDescription: "当任务需要验证 20 篇论文 PDF 是否真实存在、大小是否正常、并输出 pass/fail 报告时使用此技能。",
+    skillDescription: "当任务需要验证论文 PDF 是否真实存在、大小是否正常、并输出 pass/fail 报告时使用此技能。",
     guideContent: `---
 name: 论文完整性校验
 description: 当任务需要验证论文 PDF 是否真实存在且可交付，并输出 pass/fail 结果时使用此技能。
@@ -223,13 +223,13 @@ description: 当任务需要验证论文 PDF 是否真实存在且可交付，�
 ## 何时使用
 
 - 当下载与交付打包已经完成，需要做最终验收时。
-- 当任务要求“验证 20 个 PDF 是否都存在”“输出校验结果”时。
+- 当任务要求”验证 PDF 是否都存在””输出校验结果”时。
 - 当 reviewer 要求明确的 machine-checkable 结果时。
 
 ## 输入参数
 
 - \`manifestPath\`：必填。交付 manifest 或合并 manifest 的 JSON 路径。
-- \`requiredCount\`：可选。预期需要通过校验的论文数量。
+- \`requiredCount\`：可选。预期需要通过校验的论文数量（由用户目标决定，不要硬编码）。
 - \`outputLabel\`：可选。用于区分本次校验目录。
 
 ## 输出重点

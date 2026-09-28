@@ -44,6 +44,12 @@ export interface TodoDrivenOrchestratorOptions {
   maxSteps?: number;
   idleStepLimit?: number;
   onProgress?: (event: TodoDrivenProgressEvent) => void;
+  /**
+   * Human-in-the-Loop hook forwarded to runTodoDrivenStep.
+   * Called after the initial plan is generated; execution pauses until
+   * the returned Promise resolves (user confirms or timeout fires).
+   */
+  onPlanReady?: (todos: import("../supervisor-runtime-state").TodoItem[]) => Promise<string>;
 }
 
 export interface TodoDrivenOrchestratorOutput {
@@ -100,48 +106,13 @@ function collectTodoOutputs(state: RunState): string[] {
 }
 
 function readLatestFinalDeliveryOutput(state: RunState) {
-  const rankPath = (artifactPath: string, artifactType: string) => {
-    const path = artifactPath.toLowerCase();
-    let score = 0;
-    if (path.includes("final_delivery")) score += 100;
-    else if (path.includes("manifest_final")) score += 70;
-    else if (path.includes("final_check")) score += 50;
-    if (artifactType === "report") score += 20;
-    if (artifactType === "manifest") score += 10;
-    return score;
-  };
-
-  const preferredReport = [...state.artifacts]
-    .filter((artifact) => {
-      const path = artifact.path.toLowerCase();
-      return artifact.type === "report" && (
-        path.includes("final_delivery") ||
-        path.includes("manifest_final") ||
-        path.includes("final_check")
-      );
-    })
-    .sort((a, b) => rankPath(b.path, b.type) - rankPath(a.path, a.type))[0];
-  if (preferredReport) {
-    if (preferredReport.workspace_file_id) {
-      return readWorkspaceFileContent(state, preferredReport.workspace_file_id, 40000);
-    }
-    return preferredReport.inline_preview ?? preferredReport.summary ?? null;
+  const genericPreferred = [...state.artifacts]
+    .reverse()
+    .find((artifact) => artifact.type === "final_output" || artifact.type === "report" || artifact.type === "manifest");
+  if (genericPreferred?.workspace_file_id) {
+    return readWorkspaceFileContent(state, genericPreferred.workspace_file_id, 40000);
   }
-
-  const fallbackManifest = [...state.artifacts]
-    .filter((artifact) => {
-      const path = artifact.path.toLowerCase();
-      return artifact.type === "manifest" && (
-        path.includes("final_delivery") ||
-        path.includes("manifest_final") ||
-        path.includes("final_check")
-      );
-    })
-    .sort((a, b) => rankPath(b.path, b.type) - rankPath(a.path, a.type))[0];
-  if (fallbackManifest?.workspace_file_id) {
-    return readWorkspaceFileContent(state, fallbackManifest.workspace_file_id, 40000);
-  }
-  return fallbackManifest?.inline_preview ?? fallbackManifest?.summary ?? null;
+  return genericPreferred?.inline_preview ?? genericPreferred?.summary ?? null;
 }
 
 /**
@@ -347,6 +318,7 @@ export async function runTodoDrivenOrchestrator(
         recoveryPolicy: options.recoveryPolicy,
         reviewFailRetryBudget: options.reviewFailRetryBudget,
         allowInternalReplan: true,
+        onPlanReady: options.onPlanReady,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

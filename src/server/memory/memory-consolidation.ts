@@ -16,7 +16,6 @@ import {
   longTermMemoryService,
   buildTermWeights,
   type MemoryScopeType,
-  type LongTermMemoryItem,
 } from "@/server/memory/long-term-memory-service";
 
 // ──────────────────────────────────────────────────────────
@@ -52,7 +51,7 @@ export async function consolidateScope(
   const newMemoryIds: string[] = [];
   let mergedPairs = 0;
 
-  for (const { a, b, similarity } of pairs) {
+  for (const { a, b } of pairs) {
     if (mergedPairs >= maxMerges) break;
     if (mergedSourceIds.has(a.id) || mergedSourceIds.has(b.id)) continue;
 

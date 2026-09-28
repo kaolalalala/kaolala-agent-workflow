@@ -36,6 +36,14 @@ function loadManifest(filePath) {
   return Array.isArray(parsed.papers) ? parsed.papers : [];
 }
 
+function resolveRequiredCount(inputValue, manifestCount) {
+  const explicit = Number(inputValue);
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return Math.floor(explicit);
+  }
+  return Math.max(1, manifestCount);
+}
+
 function buildMarkdownReport(payload) {
   const lines = [
     "# 论文完整性校验",
@@ -69,7 +77,8 @@ function main() {
     throw new Error(`manifest not found: ${manifestPath}`);
   }
 
-  const requiredCount = Math.max(1, Number(input.requiredCount || 20));
+  const manifestPapers = loadManifest(manifestPath);
+  const requiredCount = resolveRequiredCount(input.requiredCount, manifestPapers.length);
   const outputLabel = String(input.outputLabel || "").trim();
   const rootOutputDir = resolve(process.env.AGENT_OUTPUT_DIR || ".output/v0_2/skill_runs/paper_verify");
   const targetOutputDir = outputLabel
@@ -77,7 +86,7 @@ function main() {
     : rootOutputDir;
   mkdirSync(targetOutputDir, { recursive: true });
 
-  const papers = loadManifest(manifestPath).slice(0, requiredCount);
+  const papers = manifestPapers.slice(0, requiredCount);
   const checks = papers.map((paper) => {
     const filePath = typeof paper.filePath === "string" ? paper.filePath : "";
     if (!filePath || !existsSync(filePath)) {

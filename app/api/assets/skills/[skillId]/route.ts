@@ -15,6 +15,9 @@ export async function PUT(request: Request, { params }: { params: Promise<{ skil
     const body = (await request.json()) as Partial<{
       name: string;
       description: string;
+      guideContent: string;
+      planningHint: string;
+      runtimeProfileId: string;
       scriptId: string;
       parameterMapping: Record<string, string>;
       outputDescription: string;

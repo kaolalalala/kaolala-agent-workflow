@@ -1,40 +1,91 @@
 # Agent Workflow Platform v0.2
 
-**可视化多智能体工作流编排与执行平台**
+**面向 Agent 研发、编排、运行、评测与演示的一体化平台**
 
-一个基于 Next.js 构建的全栈平台，用于设计、执行、监控和调试多 Agent 工作流。通过可视化节点编辑器编排智能体协作流程，配合运行中心、执行追踪和分析看板，实现对 AI Agent 全生命周期的管理。
+这是一个基于 Next.js 构建的全栈 Agent 平台，用来解决多智能体系统从“能跑”到“可编排、可观测、可评测、可恢复、可演示”的完整工程问题。平台覆盖项目管理、可视化 Workflow 编排、运行中心、Meta-Agent、自主恢复控制、评测体系、Agent Dev、资产中心、设置中心与 Showcase 演示台。
 
 ---
 
-## Screenshots
+## 平台概览
 
-### 仪表盘 & 项目管理
+平台当前已经形成一条相对完整的 Agent 生命周期闭环：
+
+- **项目管理**：按项目隔离工作流、运行记录、文件与资产
+- **Workflow 编排**：可视化搭建多节点 Agent 流程，支持节点配置、工具绑定、人工输入、版本管理
+- **运行与调试**：运行中心、执行时间线、Prompt Trace、Tool Call Trace、节点 I/O、Runtime Control
+- **Meta-Agent**：基于 Todo / Wave / Review / Recovery / Replan 的自主规划与执行系统
+- **评测体系**：Suite / Case / Run 三层评测模型，支持批量回放、横向对比与结果报告
+- **Agent Dev**：内置 Monaco + XTerm 的开发模式，支持工作区脚本开发与追踪
+- **资产与设置**：模型、Prompt、工具、Skill、模板、凭证、通知等平台级配置统一管理
+- **Showcase 演示台**：为面试、汇报和场景演示准备的可启动 Demo Assets 与 Runbook
+
+---
+
+## 功能矩阵
+
+| 模块 | 关键能力 | 当前截图状态 |
+|------|----------|--------------|
+| 仪表盘 | 全局统计、最近项目、最近运行、最近文件、高亮入口 | 已有 |
+| 项目管理 | 项目 CRUD、归档、项目详情、工作流/运行/文件聚合 | 需补项目页截图 |
+| Workflow 编辑器 | ReactFlow 画布、节点库、检查器、配置、发布 | 已有 |
+| 运行中心 | 运行总览、趋势分析、成功率、Token 分析、筛选检索 | 已有 |
+| 运行详情 | Timeline、Prompt Trace、Tool Trace、节点 I/O、运行控制信号 | 已有基础图，建议补控制面截图 |
+| Meta-Agent | Session Center、Mission Control、Control Plane、Recovery、Trace、Execution Map | 需补 |
+| 评测体系 | Suite / Case / Run / Report / Compare | 需补 |
+| Agent Dev | 工作台、IDE、文件树、终端、脚本运行 | 已有 |
+| 资产中心 | 模板、模型、Prompt、工具、Skill、参考资产 | 已有 |
+| 设置中心 | 默认模型、凭证、通知通道、项目继承预览 | 需补 |
+| Showcase | 场景选择、Runbook、Provision / Launch、演示入口 | 需补 |
+| 全局能力 | 全局搜索、快速新建、通知与凭证配置 | 已有部分，建议补设置图 |
+
+完整截图建议见：[docs/SCREENSHOT_GUIDE.md](docs/SCREENSHOT_GUIDE.md)
+
+---
+
+## Screenshot Gallery
+
+### 1. 仪表盘
 
 ![Dashboard](docs/screenshots/dashboard.png)
 
-### 工作流编辑器
+展示重点：
+- 平台入口是否完整
+- 是否具备“项目 + 运行 + 文件”统一概览
+- 是否已经形成可运营的总览页
+
+### 2. Workflow 编辑器
 
 ![Workflow Editor](docs/screenshots/workflow-editor.png)
 
 <details>
-<summary>节点库 & 节点检查器</summary>
+<summary>节点库与节点检查器</summary>
 
 | 节点库 | 检查器 - 概览 | 检查器 - 配置 |
-|--------|--------------|--------------|
+|--------|---------------|----------------|
 | ![Node Library](docs/screenshots/node-library.png) | ![Inspector Overview](docs/screenshots/inspector-overview.png) | ![Inspector Config](docs/screenshots/inspector-config.png) |
 
 </details>
 
-### 运行中心 & 分析看板
+展示重点：
+- 拖拽式节点编排能力
+- 节点角色、职责、Prompt、模型、工具、Skill 的配置深度
+- 平台不是“聊天页”，而是可操作的 Agent Workflow IDE
+
+### 3. 运行中心
 
 ![Run Center](docs/screenshots/run-center.png)
 
-### 执行追踪 & 调试
+展示重点：
+- 运行数量、成功率、趋势、Token 等多维分析
+- 工作流运行与开发运行的统一观测
+- 平台具有生产态运行管理能力
+
+### 4. 执行追踪与调试
 
 ![Execution Timeline](docs/screenshots/run-trace.png)
 
 <details>
-<summary>Prompt Trace & 节点 I/O</summary>
+<summary>Prompt Trace 与节点 I/O</summary>
 
 | Prompt Trace | 节点 I/O |
 |-------------|----------|
@@ -42,200 +93,254 @@
 
 </details>
 
-### 开发台 (Agent Dev)
+展示重点：
+- 执行时间线与节点级追踪
+- Prompt Trace / Tool Trace / 节点 I/O 的白盒调试能力
+- 适合展示“不是黑盒调用，而是可观测运行系统”
+
+### 5. Agent Dev
 
 | 工作台列表 | IDE 环境 |
-|-----------|---------|
+|-----------|----------|
 | ![Agent Dev](docs/screenshots/agent-dev.png) | ![Agent Dev IDE](docs/screenshots/agent-dev-ide.png) |
 
 ![运行脚本](docs/screenshots/agent-dev-run.png)
 
-### 资产管理 & 全局功能
+展示重点：
+- 内置开发工作台与脚本执行环境
+- 平台既能编排 Workflow，也能支持 Agent 本地/工作区开发
+- 能力不止在运行层，也覆盖研发态
+
+### 6. 资产中心与全局功能
 
 | 资产管理 | 创建工作流 | 全局搜索 |
 |---------|-----------|---------|
 | ![Assets](docs/screenshots/assets.png) | ![Create Workflow](docs/screenshots/create-workflow.png) | ![Global Search](docs/screenshots/global-search.png) |
 
----
-
-## What's New
-
-### v0.2.2 — Meta-Agent 自进化引擎 (2026-03-23)
-
-**Meta-Agent — 自规划、自评估、自进化的 Agent 系统**
-
-平台不再只是跑 Agent 的工具，而是一个**能自主思考和进化的 Agent 系统**。
-
-- **自规划 (Self-Planning)** — 输入高层目标，Meta-Agent 自动设计工作流拓扑（选择节点角色、连线、分配职责）
-- **自执行 (Self-Execution)** — 调用平台自身的 Runtime Engine 运行工作流，复用全部已有基础设施
-- **自观测 (Self-Observation)** — 读取 Execution Trace、Node I/O、Token 统计，全面了解执行状况
-- **自评估 (Self-Reflection)** — LLM 对输出质量评分，判断是否达到目标，给出改进反馈
-- **自进化 (Self-Evolution)** — 根据评估反馈自动修改 Prompt、拓扑结构、工具绑定，迭代优化直到达标
-
-```
-用户给出目标 → Meta-Agent 规划工作流 → 执行 → 观测追踪 → 反思评分
-                    ↑                                          ↓
-                    └──────── 未达标：自动调整策略，重新规划 ←───┘
-```
-
-- 独立页面 `/meta-agent`：输入目标、设置迭代次数和质量阈值、查看完整迭代过程
-- 完整的工作流进化历程可视化：每轮的拓扑变化、评分、调整策略
+展示重点：
+- 资源不是散落配置，而是统一资产化管理
+- 快速新建与全局搜索增强平台使用效率
 
 ---
 
-### v0.2.1 — Runtime & Memory 增强 (2026-03-23)
+## 建议补充的高价值截图
 
-**执行引擎升级**
-- **Durable Scheduler** — 基于 checkpoint 的 DAG 调度器，支持运行中断后恢复
-- **Agent Registry** — 能力注册表，支持基于能力的 Agent 查找与动态 Handoff
-- **Built-in Agent Tools** — 运行时内置工具（由引擎拦截处理，非外部工具调用）
-- **Reflection** — Agent 输出自评估与迭代改进机制
-- **Circuit Breaker** — 熔断器，防止外部服务故障时的级联崩溃
-- **Retry** — 指数退避 + 抖动的自动重试，区分暂时性/永久性错误
-- **Token Budget** — Run/Node 级别的 Token 预算追踪与限制
+下面这些是当前 README 最值得新增的截图，建议按文档里的命名统一补齐：
 
-**记忆系统**
-- **Working Memory** — Token 预算感知的动态上下文装配，替代固定拼接
-- **Memory Consolidation** — 相似记忆合并与衰减机制
-- **Embedding Service** — 向量嵌入服务（兼容 OpenAI Embeddings API）
-- **Long-term Memory** 增强 — 支持向量检索与语义相似度
+| 建议文件名 | 页面 / 路由 | 建议展示内容 |
+|-----------|-------------|--------------|
+| `projects-page.png` | `/projects` | 项目列表、搜索/筛选、项目卡片 |
+| `project-detail.png` | `/projects/{projectId}` | Workflow / Runs / Files 聚合、Meta-Agent Activity |
+| `run-detail-control-plane.png` | `/projects/{projectId}/runs/{runId}` | Timeline + Runtime Control / Replay / Checkpoints |
+| `meta-agent-overview.png` | `/meta-agent` | Mission Control、Session Center、Runtime Signals |
+| `meta-agent-control-plane.png` | `/meta-agent` | Control Plane、Recovery、Checkpoints、Replay Candidates |
+| `meta-agent-trace.png` | `/meta-agent` | Execution Trace、Todo / Wave / Issues / Artifacts |
+| `evaluations-page.png` | `/evaluations` | Suite / Case / Run / Report 面板 |
+| `settings-page.png` | `/settings` | 默认模型、凭证、通知通道、继承预览 |
+| `showcase-console.png` | `/showcases` | 场景选择、Runbook、Launch Real Demo、最新结果 |
 
-**评估系统 (Evaluation)**
-- 新增评估模块：Suite / Case / Run 三层结构
-- 评估页面与 API（`/evaluations`）
-- 支持批量评估与结果对比
-
-**通知系统 (Notification Channels)**
-- 运行完成/失败时自动推送通知
-- 6 种通道适配器：飞书、钉钉、Slack、Discord、通用 Webhook、SMTP 邮件
-- 设置页面可视化管理：添加/删除/启用禁用/测试发送
-- 配置加密存储（AES-256-GCM），投递日志记录
-
-**其他**
-- Layout 全面升级，新增评估入口
-- RightInspector 配置面板优化
-- LLM Adapter 增强：支持更多 Provider 特性
-- Output Manager：运行产物统一管理
-
-> 完整变更记录: [docs/CHANGELOG_CN_v0_2.md](docs/CHANGELOG_CN_v0_2.md)
+详细机位和构图建议见：[docs/SCREENSHOT_GUIDE.md](docs/SCREENSHOT_GUIDE.md)
 
 ---
 
-## Features
+## 最近重点增强
 
-平台涵盖从项目管理到智能体开发的完整工具链：
+### Meta-Agent：从“能跑”升级到“可控制”
 
-- **Meta-Agent** — 自规划、自评估、自进化的 Agent 系统，输入目标自动设计并迭代优化工作流
-- **可视化工作流编辑器** — 拖拽式节点画布，支持 8 种智能体角色节点的编排与连接（并且也支持自定义）
-- **运行中心 & 分析看板** — 工作流运行/开发运行双视角，趋势图、成功率、Token 用量等多维图表
-- **执行追踪 & 调试** — 执行时间线、节点 I/O 检查、Prompt Trace、Tool Call Trace
-- **开发台 (Agent Dev)** — 集成 Monaco 编辑器 + 终端的 IDE 环境，直接运行脚本并追踪
-- **资产管理** — 模型、Prompt 模板、工具、技能包、参考文档的统一管理
-- **项目管理** — 项目 CRUD、归档、工作流版本管理、全局搜索
-- **通知推送** — 运行完成/失败自动通知，支持飞书、钉钉、Slack、Discord、Webhook、邮件
+- 基于 Todo / Wave 的运行时调度
+- 支持 LLM-as-Judge、Recovery、Reroute、Split、Replan
+- 前端已提供 Mission Control、Control Plane、Replay Candidates、Execution Trace、Execution Map
+- 具备更明确的运行治理与可观测能力，而不是单纯的 prompt 链路
 
-> 详细功能说明: [docs/FEATURES.md](docs/FEATURES.md)
+### Runtime & Memory：从“上下文拼接”升级到“分层记忆”
+
+- Working Memory：按 token budget 组装上下文
+- Long-term Memory：支持 embedding 检索、去重、衰减、合并
+- Project / Meta-Agent Memory：沉淀 planner / routing / review / recovery 经验
+- 支持 checkpoint、恢复路径、输出资产化管理
+
+### Evaluation：从“人工看结果”升级到“结构化回归评测”
+
+- Suite / Case / Run 三层模型
+- 支持批量执行、结果报告、回放与横向对比
+- 配合运行追踪，可定位质量退化到底发生在哪一层
+
+### Showcase：从“说明文档”升级到“可启动演示资产”
+
+- 内置多套可展示的场景化演示
+- 支持 Provision / Launch Real Demo
+- 更适合面试、汇报与对外演示
 
 ---
 
-## Tech Stack
+## 核心功能模块
+
+### 1. Dashboard
+
+- 平台总览统计
+- 最近项目 / 最近运行 / 最近文件
+- 快速进入高频功能页面
+
+### 2. Projects
+
+- 项目创建、归档、删除、筛选
+- 项目详情聚合工作流、运行、文件
+- 面向业务场景做多项目隔离
+
+### 3. Workflow Editor
+
+- 基于 ReactFlow 的可视化编排
+- 支持节点添加、连线、职责配置、Prompt 配置、模型配置、工具/Skill 绑定
+- 支持人工输入、版本发布与运行
+
+### 4. Run Center & Run Detail
+
+- 全局运行分析看板
+- Execution Timeline
+- Prompt Trace / Tool Trace / 节点 I/O
+- Runtime Control、Checkpoints、Replay Candidates
+
+### 5. Meta-Agent
+
+- 输入目标后自动规划 Todo 图
+- 运行时支持 Selection、Wave、Delegation、Review、Recovery、Replan
+- 页面上可查看会话中心、控制平面、恢复信号、记忆与轨迹
+
+### 6. Evaluations
+
+- 评测套件、评测用例、评测执行记录
+- 批量评测、结果报告、对比分析
+- 适合做回归验证与质量门禁
+
+### 7. Agent Dev
+
+- 工作区 / 本地项目双模式
+- Monaco 编辑器 + 文件树 + XTerm
+- 一键运行脚本并纳入平台追踪
+
+### 8. Assets
+
+- 工作流模板、节点模板、模型、Prompt 模板、工具、Skill、参考资料统一管理
+- 提升复用性和平台化治理能力
+
+### 9. Settings
+
+- 默认 Provider / Model / BaseUrl / Credential
+- 凭证创建与管理
+- 通知通道与项目继承预览
+
+### 10. Showcases
+
+- 面向面试 / 汇报的场景化演示台
+- 支持 Runbook 展示与真实 Demo 启动
+
+---
+
+## 技术栈
 
 | 层 | 技术 |
 |----|------|
-| 框架 | Next.js 16 (App Router) + React 19 + TypeScript 5 |
+| 前端框架 | Next.js 16 (App Router) + React 19 + TypeScript 5 |
 | 状态管理 | Zustand |
-| 可视化 | ReactFlow (节点画布) + Recharts (图表) |
-| 代码编辑 | Monaco Editor |
-| 终端 | XTerm.js + node-pty |
-| UI | Tailwind CSS 4 + Radix UI + Lucide Icons |
-| 数据库 | SQLite (`node:sqlite`) |
-| 构建 | Turbopack (开发) / Next.js Build (生产) |
+| 可视化 | ReactFlow + Recharts |
+| 编辑器与终端 | Monaco Editor + XTerm.js + node-pty |
+| UI | Tailwind CSS 4 + Radix UI + Lucide |
+| 后端形态 | Next.js Route Handlers + 服务层单体架构 |
+| 执行引擎 | Workflow Runtime + Meta-Agent Runtime |
+| 持久化 | SQLite (`node:sqlite`) |
+| 记忆系统 | Working Memory + Long-term Memory + Project Memory |
 
-> 完整技术架构: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+完整架构说明见：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ---
 
-## Quick Start
+## 快速开始
 
 ```bash
-# 克隆项目
 git clone <repo-url>
-cd agent-workflow-v0.2
-
-# 安装依赖
+cd agent_workflow_v0_2
 npm install
-
-# 启动开发服务器
 npm run dev
 ```
 
-打开 [http://localhost:3000](http://localhost:3000)，自动跳转到仪表盘。
+打开 [http://localhost:3000](http://localhost:3000) 即可进入平台。
+
+质量校验：
 
 ```bash
-# 质量校验
 npm run lint
-npm run test
+npm test
 npm run build
 ```
 
-> 详细配置说明: [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)
+更多配置说明见：[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)
 
 ---
 
-## Project Structure
+## 页面地图
 
-```
-├── app/
-│   ├── (platform)/          # 平台页面 (仪表盘/项目/运行/开发台/资产/设置)
-│   └── api/                 # RESTful API 路由 (50+ 端点)
-├── src/
-│   ├── features/workflow/   # 工作流编辑器 (画布/检查器/状态管理/API 客户端)
-│   ├── components/          # 通用 UI 组件 + 终端组件
-│   ├── server/
-│   │   ├── domain/          # 领域模型 (15 个实体定义)
-│   │   ├── persistence/     # SQLite 持久化层
-│   │   ├── api/             # 后端服务层
-│   │   ├── agents/          # LLM 适配器 (多 Provider 支持)
-│   │   ├── runtime/         # 工作流执行引擎
-│   │   ├── config/          # 配置 & 内置模板
-│   │   └── tools/           # 工具执行 & 绑定
-│   └── lib/                 # 工具函数
-├── docs/                    # 项目文档
-└── .data/                   # SQLite 数据库 & 工作区文件 (运行时生成)
+| 页面 | 路由 | 说明 |
+|------|------|------|
+| 仪表盘 | `/dashboard` | 平台首页与全局概览 |
+| 项目列表 | `/projects` | 项目管理入口 |
+| 项目详情 | `/projects/{projectId}` | 单项目工作流/运行/文件总览 |
+| 工作流编辑 | `/projects/{projectId}/workflows/{workflowId}` | 可视化编排与节点配置 |
+| 运行中心 | `/runs` | 运行分析与检索 |
+| 运行详情 | `/projects/{projectId}/runs/{runId}` | 时间线、Trace、控制面 |
+| Meta-Agent | `/meta-agent` | 规划、执行、控制、恢复 |
+| 评测中心 | `/evaluations` | Suite / Case / Run / Report |
+| Agent Dev | `/agent-dev` | 开发工作台入口 |
+| 资产中心 | `/assets` | 模板、模型、Prompt、工具、Skill |
+| 设置中心 | `/settings` | 默认模型、凭证、通知等 |
+| Showcase | `/showcases` | 面向演示的场景台 |
+
+---
+
+## 项目结构
+
+```text
+app/
+  (platform)/                # 平台页面
+  api/                       # Route Handlers
+src/
+  components/                # 通用组件
+  features/workflow/         # Workflow 前端模块
+  features/showcase/         # Showcase 前端模块
+  server/
+    api/                     # 后端服务
+    runtime/                 # 工作流执行引擎
+    meta-agent/              # Todo-driven Meta-Agent
+    evaluation/              # 评测体系
+    memory/                  # 工作记忆 / 长期记忆 / 向量检索
+    tools/                   # 工具系统
+    config/                  # 配置与模板
+    persistence/             # SQLite 持久化
+docs/
+  screenshots/               # README 截图素材
+  *.md                       # 架构、功能、设计方案文档
 ```
 
 ---
 
-## Documentation
+## 文档索引
 
 | 文档 | 说明 |
 |------|------|
-| [Features](docs/FEATURES.md) | 核心功能模块详解 |
-| [Architecture](docs/ARCHITECTURE.md) | 技术架构与设计决策 |
-| [Getting Started](docs/GETTING_STARTED.md) | 安装、配置、环境要求 |
-| [Changelog](docs/CHANGELOG_CN_v0_2.md) | v0.2 变更日志 |
+| [docs/FEATURES.md](docs/FEATURES.md) | 核心模块与能力清单 |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 平台架构与分层说明 |
+| [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) | 安装与环境配置 |
+| [docs/CHANGELOG_CN_v0_2.md](docs/CHANGELOG_CN_v0_2.md) | 版本更新记录 |
+| [docs/SCREENSHOT_GUIDE.md](docs/SCREENSHOT_GUIDE.md) | README / 展示用截图清单 |
+| [docs/interview_showcase_scenarios.md](docs/interview_showcase_scenarios.md) | 面试展示场景脚本 |
 
 ---
 
-## Known Limitations
+## 当前边界
 
-- 账号与权限系统为占位状态，尚未实现多用户隔离
-- 通知系统为最小可用版本，不含推送机制
-- 分布式部署暂不支持（当前为单机 SQLite 架构）
-- 运行对比 (Run Compare) 仅提供基础 API，前端可视化待完善
-
----
-
-## 密语
-
-大家可以自由地参与改进这个项目 🙌  
-目前已经具备了一些基础功能，但整体深度和完整性还有很大的提升空间。  
-如果你觉得这个项目对你有帮助，或者打算拿去使用的话，欢迎点个 ⭐ 支持一下～爱你们呦！  
-这对正在找相关方向实习的我来说真的非常重要，感谢大家！  
-如果在使用过程中遇到任何问题，或者有改进建议，欢迎随时提 issue，我会尽快跟进修复和优化。  
-如果后续使用的人多了，也会考虑建一个交流群方便大家一起讨论。  
-这个项目最初是想复刻类似 ComfyUI 的 workflow 形态，但在实现过程中逐渐发现还有很多细节和能力需要补齐。  
-后面也会持续迭代，在可扩展性、稳定性以及整体设计上进一步完善。  
+- 当前仍以单机 SQLite 作为主要持久化底座
+- 多用户鉴权与租户隔离尚未完整实现
+- 分布式部署与高并发场景还有进一步演进空间
+- 部分新模块已经上线，但仍需补齐更多高质量页面截图
 
 ---
 

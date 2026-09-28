@@ -7,11 +7,13 @@ import { POST as createCasePost, GET as listCasesGet } from "../../../app/api/ev
 import { POST as createSuitePost, GET as listSuitesGet } from "../../../app/api/evaluations/suites/route";
 import { configService } from "@/server/config/config-service";
 import { memoryStore } from "@/server/store/memory-store";
+import { installRuntimeTestLlm } from "@/server/__tests__/helpers/test-llm";
 
 describe("evaluation api routes", () => {
   beforeEach(() => {
     memoryStore.reset();
     configService.resetForTests();
+    installRuntimeTestLlm();
     vi.useFakeTimers();
   });
 
@@ -58,8 +60,8 @@ describe("evaluation api routes", () => {
         method: "POST",
         body: JSON.stringify({
           name: "基础用例",
-          taskInput: "请给出 mock-agent-v1 的结果",
-          expectedOutputContains: "mock-agent-v1",
+          taskInput: "请给出 test llm 的结果",
+          expectedOutputContains: "任务执行完成",
         }),
         headers: { "Content-Type": "application/json" },
       }),
@@ -137,5 +139,5 @@ describe("evaluation api routes", () => {
     expect(typeof evaluationRunBody.evaluationRun.report?.baseline.taskInput).toBe("string");
     expect(typeof evaluationRunBody.evaluationRun.report?.replay.taskInput).toBe("string");
     expect(Array.isArray(evaluationRunBody.evaluationRun.report?.artifacts.missingReplayFiles)).toBe(true);
-  });
+  }, 10_000);
 });

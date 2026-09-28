@@ -1,6 +1,5 @@
 import { nowIso } from "@/lib/utils";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { outputManager } from "@/server/runtime/output-manager";
 import { toolExecutor } from "@/server/tools/tool-executor";
 import { toolService } from "@/server/tools/tool-service";
@@ -21,6 +20,14 @@ import {
 } from "../supervisor-runtime-state";
 import { sanitizeJsonLikeText, sanitizeModelText } from "../text-cleaner";
 import type { DelegationBrief, SubagentDefinition, SubagentExecutionResult } from "./types";
+import {
+  collectProfileArtifactCriteriaEvidence,
+  collectProfileStructuredCriteriaEvidence,
+  normalizeArtifactsWithProfiles,
+  scoreRecoveredToolCallWithProfiles,
+  summarizeRecoveredToolResultWithProfiles,
+} from "./result-profiles";
+import { getDelegationBriefRuntimeProfiles } from "./runtime-profiles";
 import { findSubagentByCapability } from "./subagent-registry";
 import {
   getAutonomyMaxRounds,
@@ -56,12 +63,142 @@ function asStringArray(value: unknown) {
   return value.filter((item): item is string => typeof item === "string").map((item) => sanitizeModelText(item));
 }
 
-function summarizeRecoveredToolResult(toolName: string, result: Record<string, unknown>) {
-  if (typeof result.downloadedCount === "number") {
-    return `Recovered successful tool output from ${toolName}: downloaded ${result.downloadedCount} item(s).`;
+function pushUniqueEvidence(target: string[], seen: Set<string>, entry: unknown) {
+  if (entry === undefined || entry === null) return;
+  const text = sanitizeModelText(String(entry)).trim();
+  if (!text || seen.has(text)) return;
+  seen.add(text);
+  target.push(text);
+}
+
+function collectStructuredCriteriaEvidence(result?: Record<string, unknown> | null) {
+  return collectStructuredCriteriaEvidenceForProfiles([], result);
+}
+
+function collectStructuredCriteriaEvidenceForProfiles(
+  activeProfiles: string[],
+  result?: Record<string, unknown> | null,
+) {
+  if (!result) return [] as string[];
+
+  const evidence: string[] = [];
+  const seen = new Set<string>();
+  const fields: Array<[string, string]> = [
+    ["duplicateCount", "duplicateCount"],
+    ["missingCount", "missingCount"],
+    ["requiredCount", "requiredCount"],
+    ["checkedCount", "checkedCount"],
+    ["passedCount", "passedCount"],
+    ["manifestPath", "manifestPath"],
+    ["reportPath", "reportPath"],
+    ["filePath", "filePath"],
+    ["outputDir", "outputDir"],
+  ];
+
+  for (const [field, label] of fields) {
+    const value = result[field];
+    if (typeof value === "number") {
+      pushUniqueEvidence(evidence, seen, `${label}=${value}`);
+      continue;
+    }
+    if (typeof value === "string" && value.trim()) {
+      pushUniqueEvidence(evidence, seen, `${label}=${value.trim()}`);
+    }
   }
-  if (typeof result.mergedCount === "number") {
-    return `Recovered successful tool output from ${toolName}: merged ${result.mergedCount} unique item(s).`;
+
+  for (const item of collectProfileStructuredCriteriaEvidence(activeProfiles, result)) {
+    pushUniqueEvidence(evidence, seen, item);
+  }
+
+  return evidence;
+}
+
+function collectArtifactCriteriaEvidence(
+  artifacts: Array<{ path: string; type: string; summary: string }>,
+) {
+  return collectArtifactCriteriaEvidenceForProfiles([], artifacts);
+}
+
+function collectArtifactCriteriaEvidenceForProfiles(
+  activeProfiles: string[],
+  artifacts: Array<{ path: string; type: string; summary: string }>,
+) {
+  const evidence: string[] = [];
+  const seen = new Set<string>();
+
+  for (const artifact of artifacts) {
+    const artifactPath = sanitizeModelText(artifact.path).trim();
+    if (!artifactPath) continue;
+
+    if (artifact.type === "manifest") {
+      pushUniqueEvidence(evidence, seen, `artifactManifestPath=${artifactPath}`);
+    } else if (artifact.type === "report") {
+      pushUniqueEvidence(evidence, seen, `artifactReportPath=${artifactPath}`);
+    }
+
+    for (const item of collectProfileArtifactCriteriaEvidence(activeProfiles, [{ path: artifactPath, type: artifact.type, summary: artifact.summary }])) {
+      pushUniqueEvidence(evidence, seen, item);
+    }
+
+    try {
+      if (!artifactPath.toLowerCase().endsWith(".json") || !existsSync(artifactPath) || !statSync(artifactPath).isFile()) {
+        continue;
+      }
+      const parsed = safeParseJson(readFileSync(artifactPath, "utf8"));
+      for (const item of collectStructuredCriteriaEvidenceForProfiles(activeProfiles, parsed)) {
+        pushUniqueEvidence(evidence, seen, item);
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return evidence;
+}
+
+function collectToolCallCriteriaEvidence(
+  toolCalls: LLMWithToolsResult["tool_calls_made"],
+) {
+  return collectToolCallCriteriaEvidenceForProfiles([], toolCalls);
+}
+
+function collectToolCallCriteriaEvidenceForProfiles(
+  activeProfiles: string[],
+  toolCalls: LLMWithToolsResult["tool_calls_made"],
+) {
+  const evidence: string[] = [];
+  const seen = new Set<string>();
+  for (const call of toolCalls) {
+    for (const item of collectStructuredCriteriaEvidenceForProfiles(activeProfiles, call.result)) {
+      pushUniqueEvidence(evidence, seen, item);
+    }
+  }
+  return evidence;
+}
+
+function mergeCriteriaEvidence(...lists: Array<string[] | undefined>) {
+  const merged: string[] = [];
+  const seen = new Set<string>();
+  for (const list of lists) {
+    for (const item of list ?? []) {
+      pushUniqueEvidence(merged, seen, item);
+    }
+  }
+  return merged;
+}
+
+function summarizeRecoveredToolResult(toolName: string, result: Record<string, unknown>) {
+  return summarizeRecoveredToolResultForProfiles([], toolName, result);
+}
+
+function summarizeRecoveredToolResultForProfiles(
+  activeProfiles: string[],
+  toolName: string,
+  result: Record<string, unknown>,
+) {
+  const profileSummary = summarizeRecoveredToolResultWithProfiles(activeProfiles, toolName, result);
+  if (profileSummary) {
+    return profileSummary;
   }
   if (typeof result.missingCount === "number") {
     return `Recovered successful tool output from ${toolName}: missing ${result.missingCount} item(s) after merge.`;
@@ -150,6 +287,7 @@ function collectArtifactsFromSuccessfulToolCalls(
   toolCalls: LLMWithToolsResult["tool_calls_made"],
   agent: SubagentDefinition,
   brief: DelegationBrief,
+  activeProfiles: string[],
 ) {
   const aggregated: Array<{ path: string; type: string; summary: string }> = [];
   const seen = new Set<string>();
@@ -159,7 +297,7 @@ function collectArtifactsFromSuccessfulToolCalls(
     if ((call.result as { error?: unknown }).error) {
       continue;
     }
-    const summary = summarizeRecoveredToolResult(call.tool_name, call.result);
+    const summary = summarizeRecoveredToolResultForProfiles(activeProfiles, call.tool_name, call.result);
     const fallbackPath = outputManager.normalizeOutputPath(
       brief.run_id,
       brief.todo_id,
@@ -177,35 +315,97 @@ function collectArtifactsFromSuccessfulToolCalls(
   return aggregated;
 }
 
+function scoreRecoveredToolCall(
+  call: LLMWithToolsResult["tool_calls_made"][number],
+  index: number,
+) {
+  return scoreRecoveredToolCallForProfiles([], call, index);
+}
+
+function scoreRecoveredToolCallForProfiles(
+  activeProfiles: string[],
+  call: LLMWithToolsResult["tool_calls_made"][number],
+  index: number,
+) {
+  const profileScore = scoreRecoveredToolCallWithProfiles(activeProfiles, call, index);
+  if (typeof profileScore === "number") {
+    return profileScore;
+  }
+
+  const manifestPath = typeof call.result.manifestPath === "string"
+    ? call.result.manifestPath.toLowerCase()
+    : "";
+  const reportPath = typeof call.result.reportPath === "string"
+    ? call.result.reportPath.toLowerCase()
+    : "";
+
+  if (typeof call.result.passedCount === "number" || typeof call.result.checkedCount === "number") {
+    return 3000 + index;
+  }
+  if (manifestPath || reportPath) {
+    return 500 + index;
+  }
+  if (typeof call.result.ok === "boolean") {
+    return 100 + index;
+  }
+  return index;
+}
+
+function pickRecoveredSummaryCall(
+  successfulCalls: LLMWithToolsResult["tool_calls_made"],
+) {
+  return successfulCalls.reduce((best, call, index) => {
+    if (!best) {
+      return call;
+    }
+    const bestIndex = successfulCalls.indexOf(best);
+    return scoreRecoveredToolCall(call, index) >= scoreRecoveredToolCall(best, bestIndex)
+      ? call
+      : best;
+  }, successfulCalls[0]);
+}
+
 function recoverFromToolLoopError(
   error: LLMToolLoopError,
   agent: SubagentDefinition,
   brief: DelegationBrief,
 ): SubagentExecutionResult | null {
+  const activeProfiles = getDelegationBriefRuntimeProfiles(brief);
   const successfulCalls = error.tool_calls_made.filter((item) => !(item.result as { error?: unknown }).error);
   if (successfulCalls.length === 0) {
     return null;
   }
 
-  const lastCall = successfulCalls[successfulCalls.length - 1];
-  const summary = summarizeRecoveredToolResult(lastCall.tool_name, lastCall.result);
-  const criteriaEvidence = [
-    typeof lastCall.result.downloadedCount === "number" ? `downloadedCount=${lastCall.result.downloadedCount}` : "",
-    typeof lastCall.result.mergedCount === "number" ? `mergedCount=${lastCall.result.mergedCount}` : "",
-    typeof lastCall.result.duplicateCount === "number" ? `duplicateCount=${lastCall.result.duplicateCount}` : "",
-    typeof lastCall.result.missingCount === "number" ? `missingCount=${lastCall.result.missingCount}` : "",
-    typeof lastCall.result.manifestPath === "string" ? `manifestPath=${lastCall.result.manifestPath}` : "",
-    typeof lastCall.result.reportPath === "string" ? `reportPath=${lastCall.result.reportPath}` : "",
-  ].filter(Boolean);
+  // Aggregate criteria_evidence from ALL successful calls, not just the last one.
+  // This is critical when the subagent calls a skill (e.g. delivery-skill 鈫?manifestPath)
+  // and then calls generic tools (e.g. tool_save_local_report) afterward 鈥?the skill's
+  // output paths must not be lost just because a later tool ran last.
+  const recoveredArtifacts = normalizeArtifactsWithProfiles(
+    brief,
+    collectArtifactsFromSuccessfulToolCalls(successfulCalls, agent, brief, activeProfiles),
+  );
+  const bestCall = successfulCalls.reduce((best, call, index) => {
+    if (!best) return call;
+    const bestIndex = successfulCalls.indexOf(best);
+    return scoreRecoveredToolCallForProfiles(activeProfiles, call, index) >=
+      scoreRecoveredToolCallForProfiles(activeProfiles, best, bestIndex)
+      ? call
+      : best;
+  }, successfulCalls[0]);
+  const summary = summarizeRecoveredToolResultForProfiles(activeProfiles, bestCall.tool_name, bestCall.result);
+  const criteriaEvidence = mergeCriteriaEvidence(
+    collectToolCallCriteriaEvidenceForProfiles(activeProfiles, successfulCalls),
+    collectArtifactCriteriaEvidenceForProfiles(activeProfiles, recoveredArtifacts),
+  );
 
   return {
     status: "success",
     summary,
     token_usage: error.usage,
-    artifacts: collectArtifactsFromSuccessfulToolCalls(successfulCalls, agent, brief),
+    artifacts: recoveredArtifacts,
     open_questions: [],
     completion_notes: [
-      "Recovered from tool-loop final-response failure using the last successful tool output.",
+      "Recovered from tool-loop final-response failure using successful tool outputs.",
       `tool_loop_error=${error.message}`,
     ],
     criteria_evidence: criteriaEvidence,
@@ -358,7 +558,7 @@ function formatArtifactSummaries(artifacts: DelegationBrief["artifact_summaries"
 
   // For merge/collection todos, append an explicit "ALL inputs" block so the subagent
   // cannot accidentally process only the first artifact it encounters.
-  const isMerge = brief && /merge|合并|collect|汇总/i.test(
+  const isMerge = brief && /(?:merge|合并|collect|收集)/i.test(
     [brief.todo_title, brief.todo_description, ...(brief.acceptance_criteria ?? [])].join(" "),
   );
   if (isMerge && artifacts.length > 1) {
@@ -367,7 +567,7 @@ function formatArtifactSummaries(artifacts: DelegationBrief["artifact_summaries"
     lines.push("Input paths to merge (do NOT skip any):");
     for (const artifact of artifacts.slice(0, 8)) {
       if (artifact.path && artifact.path !== "context://compacted-artifacts") {
-        lines.push(`  • ${artifact.path}`);
+        lines.push(`  鈥?${artifact.path}`);
       }
     }
     lines.push("Do NOT stop after processing the first item. Process every path before producing output.");
@@ -402,12 +602,17 @@ function formatResourceSkillHints(brief: DelegationBrief) {
   const skills = brief.resource_center?.skills ?? [];
   if (skills.length === 0) return "none";
   return skills
-    .slice(0, 3)
-    .map((skill) => {
+    .slice(0, 5)
+    .map((skill, index) => {
       const parts = [
         `${skill.name} (${skill.id})`,
-        skill.description ? `用途: ${sanitizeModelText(skill.description)}` : "",
-        skill.output_description ? `输出: ${sanitizeModelText(skill.output_description)}` : "",
+        skill.description ? `鐢ㄩ€? ${sanitizeModelText(skill.description)}` : "",
+        skill.output_description ? `杈撳嚭: ${sanitizeModelText(skill.output_description)}` : "",
+        // Always inject guide_content for the top-ranked skill; for others inject a short excerpt.
+        // This ensures subagent knows WHEN and HOW to call the skill, not just that it exists.
+        skill.guide_content
+          ? `浣跨敤鎸囧崡: ${sanitizeModelText(index === 0 ? skill.guide_content : skill.guide_content.slice(0, 300))}`
+          : "",
       ].filter(Boolean);
       return `- ${parts.join(" | ")}`;
     })
@@ -501,108 +706,6 @@ function logDelegatePromptProfile(
   });
 }
 
-function readStructuredArtifactCount(filePath: string) {
-  if (!existsSync(filePath) || !filePath.toLowerCase().endsWith(".json")) return 0;
-  try {
-    const parsed = JSON.parse(readFileSync(filePath, "utf8")) as Record<string, unknown>;
-    if (Array.isArray(parsed.papers)) return parsed.papers.length;
-    if (Array.isArray(parsed.items)) return parsed.items.length;
-    if (Array.isArray(parsed.checks)) return parsed.checks.length;
-    if (typeof parsed.deliveredCount === "number") return parsed.deliveredCount;
-    if (typeof parsed.mergedCount === "number") return parsed.mergedCount;
-    if (typeof parsed.checkedCount === "number") return parsed.checkedCount;
-    if (typeof parsed.passedCount === "number") return parsed.passedCount;
-  } catch {
-    return 0;
-  }
-  return 0;
-}
-
-function pickBestArtifactPath(paths: string[], type: "manifest" | "report") {
-  const deduped = Array.from(new Set(paths.filter((item) => existsSync(item))));
-  if (deduped.length === 0) return null;
-  if (type === "report") {
-    return deduped
-      .sort((left, right) => Number(statSync(right).size) - Number(statSync(left).size))[0] ?? null;
-  }
-  return deduped
-    .sort((left, right) => readStructuredArtifactCount(right) - readStructuredArtifactCount(left))[0] ?? null;
-}
-
-function shouldNormalizeDeliveryOutputs(brief: DelegationBrief) {
-  const text = [
-    brief.todo_title,
-    brief.todo_description,
-    ...brief.acceptance_criteria,
-  ].join("\n").toLowerCase();
-  return /deliver|delivery|交付|交付包|最终清单|final package/.test(text);
-}
-
-function normalizeFinalDeliveryArtifacts(
-  brief: DelegationBrief,
-  artifacts: Array<{ path: string; type: string; summary: string }>,
-) {
-  if (!shouldNormalizeDeliveryOutputs(brief)) {
-    return artifacts;
-  }
-
-  const manifestPaths = artifacts
-    .filter((artifact) => artifact.type === "manifest")
-    .map((artifact) => artifact.path);
-  const reportPaths = artifacts
-    .filter((artifact) => artifact.type === "report")
-    .map((artifact) => artifact.path);
-
-  const bestManifestPath = pickBestArtifactPath(manifestPaths, "manifest");
-  const bestReportPath = pickBestArtifactPath(reportPaths, "report");
-  if (!bestManifestPath && !bestReportPath) {
-    return artifacts;
-  }
-
-  const canonicalManifestPath = outputManager.normalizeOutputPath(
-    brief.run_id,
-    brief.todo_id,
-    "final_delivery/final_delivery_manifest.json",
-    "final_delivery_manifest.json",
-  );
-  const canonicalReportPath = outputManager.normalizeOutputPath(
-    brief.run_id,
-    brief.todo_id,
-    "final_delivery/final_delivery_report.md",
-    "final_delivery_report.md",
-  );
-
-  try {
-    if (bestManifestPath) {
-      mkdirSync(dirname(canonicalManifestPath), { recursive: true });
-      copyFileSync(bestManifestPath, canonicalManifestPath);
-    }
-    if (bestReportPath) {
-      mkdirSync(dirname(canonicalReportPath), { recursive: true });
-      copyFileSync(bestReportPath, canonicalReportPath);
-    }
-  } catch {
-    return artifacts;
-  }
-
-  const next = [...artifacts];
-  if (bestManifestPath) {
-    next.push({
-      path: canonicalManifestPath,
-      type: "manifest",
-      summary: "Canonical final delivery manifest.",
-    });
-  }
-  if (bestReportPath) {
-    next.push({
-      path: canonicalReportPath,
-      type: "report",
-      summary: "Canonical final delivery report.",
-    });
-  }
-  return next;
-}
-
 /**
  * Adapter that reuses current LLM chain for delegated subagent execution.
  */
@@ -616,6 +719,7 @@ export async function runSubagentTodo(
     parent_agent_id?: string;
   },
 ): Promise<SubagentExecutionResult> {
+  const activeProfiles = getDelegationBriefRuntimeProfiles(brief);
   const autonomyLevel = brief.autonomy_level ?? agent.autonomy_level;
   const resolvedTools = mergeResolvedTools(agent, brief, runtime);
   const hasTools = resolvedTools.length > 0;
@@ -644,7 +748,7 @@ export async function runSubagentTodo(
           ? "Tool-use policy: when a resource-center skill directly matches the todo, use that skill before trying manual workspace writes. Use workspace_write mainly for notes or summaries after tool execution."
           : "Tool-use policy: no external tools are available for this task.",
         hasTools
-          ? "Completion policy: do not stop at a partial result. If any tool output shows an unmet requirement or shortfall, such as missingCount > 0 or deliveredCount/mergedCount/checkedCount/downloadedCount being below requiredCount, continue using the relevant skills until the acceptance criteria are satisfied or you can clearly explain why no further recovery is possible."
+          ? "Completion policy: do not stop at a partial result. If tool outputs still indicate unmet requirements, incomplete artifacts, or missing evidence, continue using the relevant skills until the acceptance criteria are satisfied or you can clearly explain why no further recovery is possible."
           : "Completion policy: ensure every acceptance criterion is substantively satisfied before finalizing.",
       ].join("\n"),
     },
@@ -880,7 +984,7 @@ export async function runSubagentTodo(
               ),
             }))
         : [];
-    const toolArtifacts = collectArtifactsFromSuccessfulToolCalls(toolCallsMade, agent, brief);
+    const toolArtifacts = collectArtifactsFromSuccessfulToolCalls(toolCallsMade, agent, brief, activeProfiles);
     const mergedArtifacts = [...parsedArtifacts];
     const seenArtifactPaths = new Set(mergedArtifacts.map((artifact) => artifact.path));
     for (const artifact of toolArtifacts) {
@@ -903,7 +1007,13 @@ export async function runSubagentTodo(
               summary,
             },
           ];
-    const normalizedArtifacts = normalizeFinalDeliveryArtifacts(brief, artifacts);
+    const normalizedArtifacts = normalizeArtifactsWithProfiles(brief, artifacts);
+    const criteriaEvidence = mergeCriteriaEvidence(
+      asStringArray(parsed?.criteria_evidence),
+      collectStructuredCriteriaEvidenceForProfiles(activeProfiles, parsed),
+      collectToolCallCriteriaEvidenceForProfiles(activeProfiles, toolCallsMade),
+      collectArtifactCriteriaEvidenceForProfiles(activeProfiles, normalizedArtifacts),
+    );
 
     return {
       status: "success",
@@ -912,7 +1022,7 @@ export async function runSubagentTodo(
       artifacts: normalizedArtifacts,
       open_questions: asStringArray(parsed?.open_questions),
       completion_notes: asStringArray(parsed?.completion_notes),
-      criteria_evidence: asStringArray(parsed?.criteria_evidence),
+      criteria_evidence: criteriaEvidence,
       raw_output: sanitizeModelText(raw),
     };
   } catch (error) {
@@ -933,3 +1043,4 @@ export async function runSubagentTodo(
     };
   }
 }
+

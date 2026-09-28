@@ -118,8 +118,6 @@ export function RightInspector() {
   const updateNodeDetails = useWorkflowStore((state) => state.updateNodeDetails);
   const saveNodeAsTemplate = useWorkflowStore((state) => state.saveNodeAsTemplate);
   const nodeContextsByNodeId = useWorkflowStore((state) => state.nodeContextsByNodeId);
-  const currentWorkflow = useWorkflowStore((state) => state.currentWorkflow);
-
   const selectedNode = nodes.find((node) => node.id === selectedNodeId);
   const selectedContext = selectedNodeId ? nodeContextsByNodeId[selectedNodeId] : undefined;
 
@@ -172,7 +170,7 @@ export function RightInspector() {
       return "-";
     }
     if (nodeDraft.useWorkspaceModelDefault) {
-      return `${workspaceConfig?.defaultProvider ?? "mock"} / ${workspaceConfig?.defaultModel ?? "mock-agent-v1"}`;
+      return `${workspaceConfig?.defaultProvider ?? "未配置"} / ${workspaceConfig?.defaultModel ?? "未配置"}`;
     }
     return `${nodeDraft.provider || "-"} / ${nodeDraft.model || "-"}`;
   }, [nodeDraft, workspaceConfig]);
@@ -745,7 +743,7 @@ export function RightInspector() {
                           setNodeDraft((prev) => (prev ? { ...prev, nodeApiKey: event.target.value } : prev))
                         }
                         placeholder="API Key（输入后自动创建凭证，已配置时可留空）"
-                        type="password"
+                        type="text"
                       />
                       {nodeDraft?.credentialId && (
                         <p className="text-[11px] text-slate-500 dark:text-slate-400">

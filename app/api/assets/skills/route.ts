@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { runService } from "@/server/api/run-service";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 function statusOf(message: string) {
   if (message.includes("不存在")) return 404;
   if (message.includes("不能为空") || message.includes("无效")) return 400;
@@ -11,7 +14,11 @@ function statusOf(message: string) {
 
 export async function GET() {
   try {
-    return NextResponse.json(runService.listSkillAssets());
+    return NextResponse.json(runService.listSkillAssets(), {
+      headers: {
+        "Cache-Control": "no-store, max-age=0",
+      },
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "获取技能资产失败";
     return NextResponse.json({ error: message }, { status: statusOf(message) });
@@ -24,6 +31,9 @@ export async function POST(request: Request) {
       name?: string;
       scriptId?: string;
       description?: string;
+      guideContent?: string;
+      planningHint?: string;
+      runtimeProfileId?: string;
       parameterMapping?: Record<string, string>;
       outputDescription?: string;
       enabled?: boolean;

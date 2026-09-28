@@ -479,6 +479,74 @@ CREATE TABLE IF NOT EXISTS run_state_trace (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS run_control_state (
+  run_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL,
+  owner_kind TEXT NOT NULL,
+  owner_ref TEXT NOT NULL,
+  active_node_id TEXT,
+  current_checkpoint_id TEXT,
+  budget_json TEXT NOT NULL,
+  allowed_actions_json TEXT NOT NULL,
+  recovery_policy_json TEXT NOT NULL,
+  replay_scope_json TEXT NOT NULL,
+  pending_approval_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS run_node_control_state (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  owner_kind TEXT NOT NULL,
+  owner_ref TEXT NOT NULL,
+  allowed_actions_json TEXT NOT NULL,
+  recovery_policy_json TEXT NOT NULL,
+  budget_json TEXT NOT NULL,
+  checkpoint_eligible INTEGER NOT NULL DEFAULT 0,
+  replay_eligible INTEGER NOT NULL DEFAULT 0,
+  partial_rerun_eligible INTEGER NOT NULL DEFAULT 0,
+  approval_required INTEGER NOT NULL DEFAULT 0,
+  approval_status TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(run_id, node_id)
+);
+
+CREATE TABLE IF NOT EXISTS run_control_action (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  node_id TEXT,
+  action_type TEXT NOT NULL,
+  target_scope TEXT NOT NULL,
+  proposer TEXT NOT NULL,
+  owner_kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  side_effect_level TEXT NOT NULL,
+  approval_required INTEGER NOT NULL DEFAULT 0,
+  payload_json TEXT,
+  recovery_decision TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS run_approval_request (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  node_id TEXT,
+  action_id TEXT,
+  risk_level TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  requested_by TEXT NOT NULL,
+  status TEXT NOT NULL,
+  approved_by TEXT,
+  approved_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_run_node_trace_run ON run_node_trace(run_id, node_id);
 CREATE INDEX IF NOT EXISTS idx_run_node_trace_exec ON run_node_trace(execution_id);
 CREATE INDEX IF NOT EXISTS idx_run_prompt_trace_run ON run_prompt_trace(run_id, node_id);
@@ -487,6 +555,12 @@ CREATE INDEX IF NOT EXISTS idx_run_tool_trace_run ON run_tool_trace(run_id, node
 CREATE INDEX IF NOT EXISTS idx_run_tool_trace_exec ON run_tool_trace(execution_id, round);
 CREATE INDEX IF NOT EXISTS idx_run_state_trace_run ON run_state_trace(run_id, node_id);
 CREATE INDEX IF NOT EXISTS idx_run_state_trace_exec ON run_state_trace(execution_id, checkpoint);
+CREATE INDEX IF NOT EXISTS idx_run_control_state_updated ON run_control_state(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_node_control_run_node ON run_node_control_state(run_id, node_id);
+CREATE INDEX IF NOT EXISTS idx_run_control_action_run ON run_control_action(run_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_control_action_node ON run_control_action(run_id, node_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_approval_request_run ON run_approval_request(run_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_approval_request_status ON run_approval_request(status, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_run_task_run ON run_task(run_id);
 CREATE INDEX IF NOT EXISTS idx_run_node_run ON run_node(run_id);
@@ -675,6 +749,9 @@ CREATE TABLE IF NOT EXISTS skill_asset (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   description TEXT,
+  guide_content TEXT,
+  planning_hint TEXT,
+  runtime_profile_id TEXT,
   script_id TEXT NOT NULL,
   parameter_mapping TEXT NOT NULL DEFAULT '{}',
   output_description TEXT,
@@ -703,6 +780,32 @@ CREATE INDEX IF NOT EXISTS idx_skill_binding_node ON skill_binding(run_id, node_
 if (!hasColumn("run_snapshot", "run_type")) {
   safeAlter("ALTER TABLE run_snapshot ADD COLUMN run_type TEXT NOT NULL DEFAULT 'workflow_run'");
 }
+
+if (!hasColumn("skill_asset", "guide_content")) {
+  safeAlter("ALTER TABLE skill_asset ADD COLUMN guide_content TEXT");
+}
+
+if (!hasColumn("skill_asset", "planning_hint")) {
+  safeAlter("ALTER TABLE skill_asset ADD COLUMN planning_hint TEXT");
+}
+
+if (!hasColumn("skill_asset", "runtime_profile_id")) {
+  safeAlter("ALTER TABLE skill_asset ADD COLUMN runtime_profile_id TEXT");
+}
+
+db.prepare(
+  `UPDATE skill_asset
+   SET runtime_profile_id = 'paper_delivery_pipeline'
+   WHERE runtime_profile_id IS NULL
+     AND (
+       lower(name) LIKE '%paper%' OR
+       name LIKE '%论文%' OR
+       lower(description) LIKE '%paper%' OR
+       description LIKE '%论文%' OR
+       lower(script_id) LIKE '%paper%' OR
+       lower(script_id) LIKE '%arxiv%'
+     )`,
+).run();
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS dev_run_detail (

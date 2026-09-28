@@ -1,6 +1,6 @@
 import { exec as execCallback } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { workspaceService } from "@/server/workspace/workspace-service";
@@ -83,21 +83,6 @@ function validateCommand(command: string): void {
   if (SHELL_INJECTION_PATTERN.test(trimmed)) {
     throw new Error("命令包含不允许的 shell 注入字符");
   }
-}
-
-function collectOutputFiles(wsRoot: string): string[] {
-  const outputDir = join(wsRoot, "output");
-  if (!existsSync(outputDir) || !statSync(outputDir).isDirectory()) {
-    return [];
-  }
-  const results: string[] = [];
-  const entries = readdirSync(outputDir, { withFileTypes: true });
-  for (const entry of entries) {
-    if (!entry.isDirectory()) {
-      results.push(`output/${entry.name}`);
-    }
-  }
-  return results;
 }
 
 /**

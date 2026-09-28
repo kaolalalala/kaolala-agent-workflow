@@ -31,6 +31,13 @@ export interface PersistedMetaAgentSession {
   checkpoints?: unknown[];
   replayCandidates?: unknown[];
   memoryWritebackSummary?: unknown;
+  pendingInput?: {
+    awaiting: boolean;
+    prompt: string;
+    requestedAt: string;
+    timeoutAt: string;
+    inputToken?: string;
+  };
   result: MetaAgentResult | null;
   lastUpdatedAt: string;
 }

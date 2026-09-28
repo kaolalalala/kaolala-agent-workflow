@@ -1,6 +1,6 @@
 ﻿import { NextResponse } from "next/server";
 
-import { configService } from "@/server/config/config-service";
+import { resolveStrictWorkspaceLLMConfig } from "@/server/config/strict-llm-config";
 
 function summarizeRaw(text: string, limit = 400) {
   return text.replace(/\s+/g, " ").slice(0, limit);
@@ -12,31 +12,12 @@ async function runProbe(input?: { prompt?: string; timeoutMs?: number }) {
     const prompt = String(payload.prompt || "Diagnostic test: reply with exactly pong.").trim();
     const timeoutMs = Number(payload.timeoutMs || 40_000);
 
-    const workspace = configService.ensureWorkspaceConfig();
-    const provider = workspace.defaultProvider || "mock";
-    const baseURL = workspace.defaultBaseUrl || "";
-    const model = workspace.defaultModel || "mock-agent-v1";
-    const apiKey = configService.resolveCredentialApiKey(workspace.defaultCredentialId);
+    const workspace = resolveStrictWorkspaceLLMConfig();
+    const provider = workspace.provider;
+    const baseURL = workspace.baseUrl;
+    const model = workspace.model;
+    const apiKey = workspace.apiKey;
     const requestPath = "/chat/completions";
-
-    if (!baseURL || !apiKey) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "Workspace config is missing usable baseURL or credential apiKey.",
-          diagnostics: {
-            provider,
-            baseURL,
-            model,
-            requestPath,
-            messagesCount: 1,
-            toolsCount: 0,
-            stream: false,
-          },
-        },
-        { status: 400 },
-      );
-    }
 
     const requestUrl = `${baseURL.replace(/\/$/, "")}${requestPath}`;
     const body = {

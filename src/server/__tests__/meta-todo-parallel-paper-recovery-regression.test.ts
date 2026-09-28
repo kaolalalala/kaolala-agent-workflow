@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { addTodo, createRunState } from "@/server/meta-agent/supervisor-runtime-state";
 import { runTodoDrivenOrchestrator } from "@/server/meta-agent/todo-driven/orchestrator";
 import type {
   SubagentExecutionResult,
@@ -27,12 +28,77 @@ describe("parallel paper download recovery regression", () => {
       },
     });
 
+    const state = createRunState("Download 20 agent RL papers with two parallel collection batches.");
+    addTodo(state, {
+      id: "todo_collect_1",
+      title: "Download paper batch 1",
+      description: "Collect papers 1 through 10 and persist a structured batch manifest.",
+      status: "ready",
+      priority: "high",
+      assignee: "single_executor",
+      capability_type: "collection",
+      depends_on: [],
+      acceptance_criteria: [
+        "batch_1_manifest_ready",
+        "batch_1_contains_10_papers",
+      ],
+      input_refs: [],
+      notes: ["planner_parallel_batch:1-10"],
+    });
+    addTodo(state, {
+      id: "todo_collect_2",
+      title: "Download paper batch 2",
+      description: "Collect papers 11 through 20 and persist a structured batch manifest.",
+      status: "ready",
+      priority: "high",
+      assignee: "single_executor",
+      capability_type: "collection",
+      depends_on: [],
+      acceptance_criteria: [
+        "batch_2_manifest_ready",
+        "batch_2_contains_10_papers",
+      ],
+      input_refs: [],
+      notes: ["planner_parallel_batch:11-20"],
+    });
+    addTodo(state, {
+      id: "todo_merge",
+      title: "Merge both paper manifests",
+      description: "Merge the two batch manifests into one deduplicated paper manifest.",
+      status: "todo",
+      priority: "high",
+      assignee: "single_executor",
+      capability_type: "merge",
+      depends_on: ["todo_collect_1", "todo_collect_2"],
+      acceptance_criteria: [
+        "merged_manifest_ready",
+        "merged_manifest_contains_20_papers",
+      ],
+      input_refs: [],
+    });
+    addTodo(state, {
+      id: "todo_deliver",
+      title: "Deliver final paper package",
+      description: "Produce the final delivery package from the merged paper manifest.",
+      status: "todo",
+      priority: "high",
+      assignee: "single_executor",
+      capability_type: "writing",
+      depends_on: ["todo_merge"],
+      acceptance_criteria: [
+        "final_delivery_ready",
+        "final_delivery_manifest_present",
+      ],
+      input_refs: [],
+    });
+
     const result = await runTodoDrivenOrchestrator(
       {
-        goal: "帮我下载20篇agent rl的论文，要求：分2个子agent并行下载，各下载10篇",
+        goal: "Download 20 agent RL papers with two parallel collection subagents.",
         maxPlanningRounds: 2,
       },
       {
+        initialState: state,
         maxSteps: 9,
         parallel: { enabled: true, max_parallel_todos: 2 },
         stepExecutor: executor,

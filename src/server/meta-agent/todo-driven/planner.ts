@@ -28,15 +28,35 @@ interface GoalPlanningHints {
   explicitParallel: boolean;
   requestedWorkerCount: number | null;
   shouldPreferParallel: boolean;
+  requestedTotalCount: number | null;
+  requestedPerWorkerCount: number | null;
 }
 
 function hasParallelSiblingShape(todos: TodoItem[], hints: GoalPlanningHints) {
   if (!hints.shouldPreferParallel) return true;
-  const expectedWorkers = Math.max(2, hints.requestedWorkerCount ?? 2);
+  // When the user explicitly requests parallelism, expect at least 2 parallel siblings.
+  // We do NOT enforce a specific worker count — the LLM decides the right number.
   const candidates = todos.filter((todo) =>
     todo.capability_type === "collection" || todo.capability_type === "research",
   );
-  return candidates.length >= expectedWorkers;
+  return candidates.length >= 2;
+}
+
+function validateParallelCountShape(todos: TodoItem[], hints: GoalPlanningHints) {
+  if (!hints.shouldPreferParallel) return [];
+
+  const errors: string[] = [];
+  const candidates = todos.filter((todo) =>
+    todo.capability_type === "collection" || todo.capability_type === "research",
+  );
+
+  if (candidates.length < 2) {
+    errors.push(
+      "Planner must use parallel sibling todos (at least 2 collection/research siblings) when the goal explicitly requests parallelism.",
+    );
+  }
+
+  return errors;
 }
 
 function stripMarkdownFence(raw: string) {
@@ -161,7 +181,7 @@ function normalizeCountWords(goal: string) {
     [/\bten\b/gi, "10"],
     // Chinese
     [/一/g, "1"],
-    [/两|二/g, "2"],
+    [/二/g, "2"],
     [/三/g, "3"],
     [/四/g, "4"],
     [/五/g, "5"],
@@ -180,34 +200,73 @@ function analyzeGoal(goal: string): GoalPlanningHints {
     /(?:\bparallel\b|\bconcurrent\b|\bsimultaneous(?:ly)?\b|\bin parallel\b)/i.test(normalizedGoal) ||
     /并行|同时|并发|分批并行|同步执行/.test(normalizedGoal);
   const requestedWorkerCountMatch =
-    normalizedGoal.match(/\b(\d+)\s+(?:parallel\s+)?(?:subagents?|agents?|workers?)\b/i) ??
-    normalizedGoal.match(/分(\d+)个(?:并行)?子任务/);
+    normalizedGoal.match(/\b(\d+)\s+parallel\s+(?:subagents?|agents?|workers?)\b/i) ??
+    normalizedGoal.match(/\b(\d+)\s+(?:subagents?|workers?)\b/i) ??
+    normalizedGoal.match(/(\d+)\s*个?(?:并行)?(?:子代理|代理|工作器|执行器)/);
   const requestedWorkerCount = requestedWorkerCountMatch ? Number(requestedWorkerCountMatch[1]) : null;
+  const requestedTotalCountMatch =
+    normalizedGoal.match(/(?:\bdownload\b|\bcollect\b|\bfind\b|\bfetch\b|\bgather\b|\bretrieve\b|\bsearch\b)\s+(\d+)\s+(?:papers?|articles?|pdfs?|files?|docs?|documents?|items?|results?)\b/i) ??
+    normalizedGoal.match(/(?:下载|鏀堕泦|鏌ユ壘|妫€绱?|鑾峰彇|鏁寸悊)\s*(\d+)\s*(?:篇|个|份|条|项)?(?:论文|文献|papers?|articles?|pdfs?|files?|docs?|documents?|items?|results?)?/);
+  const requestedTotalCount = requestedTotalCountMatch ? Number(requestedTotalCountMatch[1]) : null;
+  const requestedPerWorkerCountMatch =
+    normalizedGoal.match(/\beach\s+(?:subagents?|agents?|workers?)(?:\s+\w+){0,6}?\s+(\d+)\s+(?:papers?|articles?|pdfs?|files?|docs?|documents?|items?|results?)\b/i) ??
+    normalizedGoal.match(/(?:each|per)\s+(?:subagents?|agents?|workers?)(?:\s+\w+){0,4}?\s+(\d+)\b/i) ??
+    normalizedGoal.match(/每(?:个|路)(?:子?\s*agent|子代理|代理|worker|工作器)?(?:各|都)?(?:下载|收集|获取|负责|处理)?\s*(\d+)\s*(?:篇|个|份|条|项)/);
+  const requestedPerWorkerCount = requestedPerWorkerCountMatch ? Number(requestedPerWorkerCountMatch[1]) : null;
 
   return {
     explicitParallel,
     requestedWorkerCount,
     shouldPreferParallel: explicitParallel || Boolean((requestedWorkerCount ?? 0) >= 2),
+    requestedTotalCount,
+    requestedPerWorkerCount,
   };
 }
 
 function buildParallelHintBlock(goal: string, hints: GoalPlanningHints) {
   if (!hints.shouldPreferParallel) return "";
 
-  const workerCount = hints.requestedWorkerCount ?? 2;
   return [
     "Parallel-first planning directive:",
     "- The user intent suggests parallel sibling todos when the work is truly independent.",
-    "- Let the model decide the exact task family, semantics, and tool use from the original goal.",
+    "- Decide the appropriate number of parallel siblings based on the work volume and natural partitioning — do NOT blindly use a fixed count.",
     "- Prefer fan-out/fan-in structure instead of a single serial collect todo when independence is clear.",
-    `- Create ${workerCount} sibling todos when possible.`,
-    `- Because the user explicitly asked for parallelism, do not replace the ${workerCount} sibling collection todos with one bulk collection todo.`,
     "- Each sibling todo should own a clear independent subset of work items.",
     "- After the parallel siblings, create one merge/synthesis todo and then one delivery todo.",
     "- Do NOT collapse all collection work into one generic todo if the user explicitly asked for parallelism.",
     `- Goal analyzed: ${goal}`,
     "",
   ].join("\n");
+}
+
+function buildCountConstraintBlock(hints: GoalPlanningHints) {
+  if (!hints.requestedTotalCount && !hints.requestedPerWorkerCount) return "";
+
+  const lines = ["Count preservation constraints:"];
+
+  if (hints.requestedTotalCount) {
+    lines.push(`- The overall requested output count is ${hints.requestedTotalCount}.`);
+    if (hints.shouldPreferParallel) {
+      lines.push(
+        `- When partitioning across parallel sibling todos, ensure the total across all siblings sums to ${hints.requestedTotalCount}, not ${hints.requestedTotalCount} per sibling.`,
+      );
+      lines.push(
+        "- Decide how many siblings and how to partition based on the work volume — let the partitioning be natural, not forced to a fixed count.",
+      );
+    }
+  }
+
+  if (hints.requestedPerWorkerCount) {
+    lines.push(
+      `- Each parallel sibling todo should target approximately ${hints.requestedPerWorkerCount} items as explicitly requested.`,
+    );
+  }
+
+  lines.push(
+    "- Preserve user-provided numeric constraints when splitting work. Do not upscale or change the total count.",
+  );
+  lines.push("");
+  return lines.join("\n");
 }
 
 function buildProjectContextBlock(context?: TodoPlanningContext) {
@@ -218,6 +277,7 @@ function buildProjectContextBlock(context?: TodoPlanningContext) {
       `${index + 1}. ${item.name}: ${[
         item.description ?? item.output_description ?? "no description",
         item.guide_content ? `guide=${item.guide_content.slice(0, 220)}` : "",
+        item.planning_hint ? `planning_hint=${item.planning_hint}` : "",
       ].filter(Boolean).join("; ")}`,
     );
 
@@ -256,6 +316,18 @@ function buildProjectContextBlock(context?: TodoPlanningContext) {
     .join("\n");
 }
 
+function buildParallelPartitioningBlock(context?: TodoPlanningContext): string {
+  const hints = (context?.resource_center?.skills ?? [])
+    .filter((s) => s.planning_hint)
+    .map((s) => `- [${s.name}] ${s.planning_hint}`);
+  if (hints.length === 0) return "";
+  return [
+    "Parallel partitioning constraints (from skill planning hints 鈥?MUST follow when creating sibling todos):",
+    ...hints,
+    "",
+  ].join("\n");
+}
+
 function buildPrompt(goal: string, context?: TodoPlanningContext, previousErrors: string[] = []) {
   const goalHints = analyzeGoal(goal);
   const goalType = context?.goalType ?? "generic";
@@ -288,6 +360,7 @@ function buildPrompt(goal: string, context?: TodoPlanningContext, previousErrors
     '      "depends_on": ["todo_x"],',
     '      "acceptance_criteria": ["measurable criterion 1", "measurable criterion 2"],',
     '      "input_refs": [],  // Always leave empty. Input artifacts are resolved at runtime via depends_on.',
+    '      "notes": ["optional_note"],',
     '      "extra_tools": ["tool_id_if_needed"],',
     '      "autonomy_override": "basic|enhanced|full"',
     "    }",
@@ -295,7 +368,7 @@ function buildPrompt(goal: string, context?: TodoPlanningContext, previousErrors
     "}",
     "",
     "Hard constraints:",
-    "- Must output 3 to 5 todos.",
+    "- Output as many todos as the goal naturally requires — do not artificially compress or expand the plan.",
     "- Every todo must include id/title/description/priority/capability_type/assignee/depends_on/acceptance_criteria.",
     "- extra_tools is optional: only add it when a todo needs specific platform tools beyond the assigned agent's defaults. Available tool IDs: " + getAvailableToolIds().join(", ") + ".",
     "- autonomy_override is optional: only add it when a todo explicitly needs enhanced/full agent autonomy.",
@@ -305,17 +378,18 @@ function buildPrompt(goal: string, context?: TodoPlanningContext, previousErrors
     "- When the goal is naturally parallelizable, prefer explicit sibling todos that can run in parallel.",
     "- Do not start with verification/review/delivery before the prerequisite production work exists unless the user explicitly asked for pre-flight validation.",
     ...(goalHints.shouldPreferParallel
-      ? [`- This goal explicitly requires parallel execution. Return at least ${Math.max(2, goalHints.requestedWorkerCount ?? 2)} sibling collection/research todos with non-overlapping scopes.`]
+      ? ["- This goal explicitly requires parallel execution. Use parallel sibling todos with non-overlapping scopes; decide the right number of siblings based on the work volume."]
       : []),
     "- The final delivery/report todo should normally be capability_type=writing unless it is purely deterministic verification.",
+    "- When a resource-center skill directly matches a todo's work, make that skill usage explicit in the todo description and align the todo with the skill's planning_hint/output contract. Do not duplicate domain-specific workflow policy in the generic planner when the skill already carries it.",
     "- Always set input_refs to [] (empty array). Never guess artifact paths or ids. The runtime resolves inputs from depends_on at execution time.",
     "- Do NOT create a scope/requirements todo if the goal already specifies what to collect, how many items, and the delivery format. In that case, start directly with collection/download todos.",
     "",
     "Recommended flow patterns (choose the best fit for the goal):",
-    "- For concrete collection/download goals with explicit parallelism: directly fan-out into parallel collection todos → merge → deliver.",
+    "- For concrete collection/download goals with explicit parallelism: directly fan-out into parallel collection todos 鈫?merge 鈫?deliver.",
     "  Do NOT prepend a 'scope clarification' todo if the goal already specifies exactly what to collect and how.",
-    "- For ambiguous or exploratory goals: scope/requirements → research/collection → analyze → produce result.",
-    "- For generation/writing goals: research/gather inputs → write draft → review → finalize.",
+    "- For ambiguous or exploratory goals: scope/requirements 鈫?research/collection 鈫?analyze 鈫?produce result.",
+    "- For generation/writing goals: research/gather inputs 鈫?write draft 鈫?review 鈫?finalize.",
     "- Always skip a step if the goal already provides the information that step would produce.",
     "",
     `Goal: ${goal}`,
@@ -323,6 +397,8 @@ function buildPrompt(goal: string, context?: TodoPlanningContext, previousErrors
     `Constraints: ${constraints}`,
     `Hints: ${contextHints}`,
     "",
+    buildParallelPartitioningBlock(context),
+    buildCountConstraintBlock(goalHints),
     buildProjectContextBlock(context),
     buildParallelHintBlock(goal, goalHints),
     feedbackBlock,
@@ -376,13 +452,14 @@ export async function planInitialTodos(
     }
 
     const validation = validateAndNormalizeTodoDrafts(parsed);
-    if (validation.ok && hasParallelSiblingShape(validation.todos, goalHints)) {
+    const parallelErrors = validateParallelCountShape(validation.todos, goalHints);
+    if (validation.ok && hasParallelSiblingShape(validation.todos, goalHints) && parallelErrors.length === 0) {
       return validation.todos;
     }
 
     lastErrors = validation.ok
-      ? [`Planner must preserve requested parallel sibling shape; expected at least ${Math.max(2, goalHints.requestedWorkerCount ?? 2)} collection/research sibling todos.`]
-      : validation.errors.slice(0, 10);
+      ? parallelErrors.slice(0, 10)
+      : [...validation.errors, ...parallelErrors].slice(0, 10);
   }
 
   throw new Error(
@@ -391,3 +468,4 @@ export async function planInitialTodos(
     }. Last raw output preview: ${stripMarkdownFence(lastRaw).slice(0, 280)}`,
   );
 }
+

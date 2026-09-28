@@ -181,19 +181,6 @@ async function downloadPdf(fileUrl, filePath) {
   return downloadPdfWithRetry(fileUrl, filePath);
 }
 
-async function runWithConcurrency(items, limit, worker) {
-  const queue = [...items];
-  const results = [];
-  const runners = Array.from({ length: Math.max(1, limit) }, async () => {
-    while (queue.length > 0) {
-      const current = queue.shift();
-      if (!current) break;
-      results.push(await worker(current));
-    }
-  });
-  await Promise.all(runners);
-  return results;
-}
 
 function buildManifestMarkdown(query, papers, failures) {
   const lines = [
@@ -260,23 +247,14 @@ async function main() {
   const selected = entries.slice(0, Math.max(requestedCount * 2, requestedCount));
   const downloaded = [];
 
-  await runWithConcurrency(selected, 3, async (entry) => {
-    if (downloaded.length >= requestedCount) {
-      return null;
-    }
+  // Download sequentially to avoid concurrent writes racing on `downloaded.length`.
+  for (const entry of selected) {
+    if (downloaded.length >= requestedCount) break;
     try {
       const fileStem = sanitizeFileName(`${entry.arxivId || "paper"}_${entry.title}`);
       const filePath = join(batchDir, `${fileStem}.pdf`);
       const bytes = await downloadPdf(entry.pdfUrl, filePath);
-      if (downloaded.length >= requestedCount) {
-        rmSync(filePath, { force: true });
-        return null;
-      }
-      downloaded.push({
-        ...entry,
-        filePath,
-        bytes,
-      });
+      downloaded.push({ ...entry, filePath, bytes });
     } catch (error) {
       failures.push({
         title: entry.title,
@@ -284,10 +262,21 @@ async function main() {
         message: error instanceof Error ? error.message : String(error),
       });
     }
-    return null;
-  });
+  }
 
   const papers = downloaded.slice(0, requestedCount);
+
+  // Hard failure when we could not collect enough papers — surface this to the
+  // orchestrator so it can retry rather than accepting a partial manifest.
+  if (papers.length < requestedCount) {
+    const failureSummary = failures.slice(0, 3).map((f) => f.message).join("; ");
+    throw new Error(
+      `Only downloaded ${papers.length}/${requestedCount} papers. ` +
+      `Available candidates: ${entries.length}. ` +
+      (failureSummary ? `Failures: ${failureSummary}` : "No more candidates returned by arXiv."),
+    );
+  }
+
   const manifestMarkdown = buildManifestMarkdown(query, papers, failures);
   const manifestPath = join(batchDir, "manifest.md");
   writeFileSync(manifestPath, manifestMarkdown, "utf8");

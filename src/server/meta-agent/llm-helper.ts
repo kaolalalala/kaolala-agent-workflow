@@ -55,6 +55,10 @@ function summarizeRaw(text: string, limit = 240) {
   return text.replace(/\s+/g, " ").slice(0, limit);
 }
 
+function makeTransientLlmError(message: string) {
+  return Object.assign(new Error(message), { transient: true });
+}
+
 function buildRequestUrl(baseUrl: string) {
   const trimmed = baseUrl.replace(/\/+$/, "");
   if (/\/chat\/completions$/i.test(trimmed)) return trimmed;
@@ -171,19 +175,19 @@ export async function callLLMWithUsage(messages: LLMMessage[]): Promise<LLMCallR
     }
 
     if (!raw.trim()) {
-      throw new Error("LLM call returned empty body");
+      throw makeTransientLlmError("LLM call returned empty body");
     }
 
     let parsed: ChatCompletionResponse;
     try {
       parsed = JSON.parse(raw) as ChatCompletionResponse;
     } catch {
-      throw new Error(`LLM response parse failed: ${summarizeRaw(raw) || "empty body"}`);
+      throw makeTransientLlmError(`LLM response parse failed: ${summarizeRaw(raw) || "empty body"}`);
     }
 
     const content = parsed.choices?.[0]?.message?.content ?? "";
     if (!String(content).trim()) {
-      throw new Error("LLM response content is empty");
+      throw makeTransientLlmError("LLM response content is empty");
     }
 
     return {
@@ -475,13 +479,13 @@ export async function callLLMWithTools(
         throw err;
       }
       if (!text.trim()) {
-        throw new Error("LLM tool-loop call returned empty body");
+        throw makeTransientLlmError("LLM tool-loop call returned empty body");
       }
       let result: ChatCompletionResponse;
       try {
         result = JSON.parse(text) as ChatCompletionResponse;
       } catch {
-        throw new Error(`LLM response parse failed: ${summarizeRaw(text) || "empty body"}`);
+        throw makeTransientLlmError(`LLM response parse failed: ${summarizeRaw(text) || "empty body"}`);
       }
       return result;
     };

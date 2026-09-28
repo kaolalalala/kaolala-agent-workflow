@@ -614,6 +614,8 @@ export function addWorkspaceFile(state: RunState, draft: WorkspaceFileDraft): Wo
 
 /**
  * Append a normalized execution log record.
+ * If state.metadata.session_id is set, also emits a real-time log_line event
+ * to the SessionEventBus so SSE subscribers receive it immediately.
  */
 export function addExecutionLog(state: RunState, log: ExecutionLogEntry) {
   if (!log.todo_id || log.todo_id.trim().length === 0) {
@@ -621,6 +623,22 @@ export function addExecutionLog(state: RunState, log: ExecutionLogEntry) {
   }
   state.execution_log.push(log);
   touch(state);
+
+  // Real-time push: emit to SSE bus if this state is bound to a live session.
+  const sessionId = state.metadata?.session_id as string | undefined;
+  if (sessionId) {
+    // Lazy import to avoid circular deps at module load time.
+    import("./session-event-bus").then(({ emitSessionEvent }) => {
+      emitSessionEvent(sessionId, {
+        type: "log_line",
+        timestamp: log.timestamp,
+        todo_id: log.todo_id,
+        actor: log.actor,
+        action: log.action,
+        message: typeof log.message === "string" ? log.message : JSON.stringify(log.message),
+      });
+    }).catch(() => { /* non-critical */ });
+  }
 }
 
 /**

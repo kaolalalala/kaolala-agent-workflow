@@ -218,6 +218,8 @@ export interface CredentialSummary {
   id: string;
   provider: string;
   label: string;
+  hasApiKey?: boolean;
+  apiKeyPreview?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -486,6 +488,7 @@ export interface SkillAssetView {
   id: string;
   name: string;
   description?: string;
+  guideContent?: string;
   scriptId: string;
   parameterMapping: Record<string, string>;
   outputDescription?: string;
@@ -645,6 +648,125 @@ export interface NotificationItemView {
   href?: string;
 }
 
+export interface ControlBudgetView {
+  maxSteps?: number;
+  usedSteps: number;
+  maxTokens?: number;
+  usedTokens: number;
+  maxCostUsd?: number;
+  usedCostUsd: number;
+  maxWallMs?: number;
+  usedWallMs: number;
+}
+
+export interface ControlActionOptionView {
+  actionType: string;
+  label: string;
+  source: "runtime" | "policy" | "role_template" | "system";
+  enabled?: boolean;
+  approvalRequired?: boolean;
+  reason?: string;
+  sideEffectLevel?: "none" | "low" | "medium" | "high" | "critical";
+}
+
+export interface ControlRecoveryPolicyView {
+  onFailure: "retry" | "reroute" | "fallback" | "terminate";
+  maxRetries?: number;
+  fallbackTarget?: string;
+  terminateReasons?: string[];
+}
+
+export interface RunControlPlaneView {
+  run: {
+    runId: string;
+    state: "pending" | "running" | "waiting_human" | "blocked_policy" | "retrying" | "completed" | "failed" | "terminated";
+    ownerKind: "runtime" | "planner" | "worker" | "meta_agent" | "human" | "reviewer";
+    ownerRef: string;
+    activeNodeId?: string;
+    currentCheckpointId?: string;
+    budget: ControlBudgetView;
+    allowedActions: ControlActionOptionView[];
+    recoveryPolicy: ControlRecoveryPolicyView;
+    replayScope: {
+      nodeReplayReady: boolean;
+      stepRerunReady: boolean;
+      runCompareReady: boolean;
+    };
+    pendingApprovalCount: number;
+    createdAt: string;
+    updatedAt: string;
+  };
+  schedule: {
+    status: "active" | "completed" | "failed" | "cancelled";
+    currentWaveIndex: number;
+    rerunMode: boolean;
+    rerunStartNodeId?: string;
+  } | null;
+  checkpoints: Array<{
+    id: string;
+    runId: string;
+    nodeId: string;
+    nodeName: string;
+    status: "running" | "completed" | "failed";
+    waveIndex: number;
+    startedAt: string;
+    finishedAt?: string;
+    error?: string;
+    createdAt: string;
+  }>;
+  nodeControls: Array<{
+    runId: string;
+    nodeId: string;
+    name: string;
+    role: string;
+    state: string;
+    ownerKind: string;
+    ownerRef: string;
+    allowedActions: ControlActionOptionView[];
+    recoveryPolicy: ControlRecoveryPolicyView;
+    budget: ControlBudgetView;
+    checkpointEligible: boolean;
+    replayEligible: boolean;
+    partialRerunEligible: boolean;
+    approvalRequired: boolean;
+    approvalStatus?: string;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  recentActions: Array<{
+    id: string;
+    runId: string;
+    nodeId?: string;
+    nodeName?: string;
+    actionType: string;
+    targetScope: "run" | "node" | "subtask" | "tool" | "browser" | "memory";
+    proposer: string;
+    ownerKind: string;
+    status: "proposed" | "approved" | "rejected" | "executing" | "succeeded" | "failed" | "cancelled";
+    sideEffectLevel: "none" | "low" | "medium" | "high" | "critical";
+    approvalRequired: boolean;
+    payload?: Record<string, unknown>;
+    recoveryDecision?: "retry" | "reroute" | "fallback" | "terminate";
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  approvals: Array<{
+    id: string;
+    runId: string;
+    nodeId?: string;
+    nodeName?: string;
+    actionId?: string;
+    riskLevel: "medium" | "high" | "critical";
+    reason: string;
+    requestedBy: string;
+    status: "pending" | "approved" | "rejected" | "expired";
+    approvedBy?: string;
+    approvedAt?: string;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+}
+
 export interface RunDetailView {
   id: string;
   projectId: string;
@@ -740,6 +862,7 @@ export interface RunDetailView {
     runCompareReady: boolean;
     notes: string;
   };
+  controlPlane: RunControlPlaneView;
   artifacts: ProjectFileView[];
   triggerSource: "manual";
 }
@@ -2292,7 +2415,7 @@ export const runtimeClient = {
   // ── Script Assets ──
 
   async listScriptAssets() {
-    const response = await fetch("/api/assets/scripts");
+    const response = await fetch("/api/assets/scripts", { cache: "no-store" });
     if (!response.ok) throw new Error(await resolveHttpError(response, "获取脚本资产失败"));
     return (await response.json()) as { scripts: ScriptAssetView[] };
   },
@@ -2345,7 +2468,7 @@ export const runtimeClient = {
   // ── Skill Assets ──
 
   async listSkillAssets() {
-    const response = await fetch("/api/assets/skills");
+    const response = await fetch("/api/assets/skills", { cache: "no-store" });
     if (!response.ok) throw new Error(await resolveHttpError(response, "获取技能资产失败"));
     return (await response.json()) as { skills: SkillAssetView[] };
   },
@@ -2354,6 +2477,7 @@ export const runtimeClient = {
     name: string;
     scriptId: string;
     description?: string;
+    guideContent?: string;
     parameterMapping?: Record<string, string>;
     outputDescription?: string;
     enabled?: boolean;
@@ -2372,6 +2496,7 @@ export const runtimeClient = {
     payload: Partial<{
       name: string;
       description: string;
+      guideContent: string;
       scriptId: string;
       parameterMapping: Record<string, string>;
       outputDescription: string;

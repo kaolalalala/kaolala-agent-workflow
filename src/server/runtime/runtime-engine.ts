@@ -1,18 +1,21 @@
-﻿import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 
-import { eventStreamHub } from "@/server/api/event-stream";
-import { notificationService } from "@/server/notification/notification-service";
 import { LLMChatAdapter } from "@/server/agents/adapters/llm-chat-adapter";
-import { MockAgentAdapter } from "@/server/agents/adapters/mock-agent-adapter";
 import type { AgentAdapter } from "@/server/agents/adapters/agent-adapter";
 import { configResolver, type ResolvedAgentExecutionConfig } from "@/server/config/config-resolver";
 import { configService } from "@/server/config/config-service";
+import { resolveStrictExecutionLLMConfig } from "@/server/config/strict-llm-config";
 import {
   AgentContext,
   AgentDefinition,
   AgentNode,
+  AllowedControlAction,
+  ControlActionRecord,
+  ControlBudgetSnapshot,
+  ControlNodeState,
+  ControlOwnerKind,
+  ControlRecoveryPolicy,
+  ControlRunState,
   Event,
   EventType,
   HumanMessage,
@@ -32,11 +35,9 @@ import { longTermMemoryService } from "@/server/memory/long-term-memory-service"
 import { assembleContext } from "@/server/memory/working-memory";
 import { consolidateScope } from "@/server/memory/memory-consolidation";
 import { orchestrateInitialRun } from "@/server/runtime/orchestrator";
-import { stateMachine } from "@/server/runtime/state-machine";
 import { memoryStore, RunSnapshot } from "@/server/store/memory-store";
 import { executeDevAgent } from "@/server/runtime/execution/dev-agent-executor";
 import { durableScheduler, DurableScheduler } from "@/server/runtime/durable-scheduler";
-import type { ScheduleState, SerializableDag } from "@/server/runtime/durable-scheduler";
 import { localProjectService } from "@/server/workspace/local-project-service";
 import { toolExecutor } from "@/server/tools/tool-executor";
 import { toolResolver } from "@/server/tools/tool-resolver";
@@ -47,8 +48,12 @@ import {
   parseReflectionResponse,
   buildImprovementPrompt,
 } from "@/server/runtime/reflection";
-import { tokenBudgetTracker } from "@/server/runtime/token-budget";
+import { DEFAULT_TOKEN_BUDGET, tokenBudgetTracker } from "@/server/runtime/token-budget";
 import { outputManager } from "@/server/runtime/output-manager";
+import { RuntimeControlService } from "@/server/runtime/runtime-control-service";
+import { RuntimeTransitionService } from "@/server/runtime/runtime-transition-service";
+import { RuntimeSchedulerService } from "@/server/runtime/runtime-scheduler-service";
+import { RuntimeNodeExecutionService } from "@/server/runtime/runtime-node-execution-service";
 import {
   getBuiltinAgentTools,
   isBuiltinTool,
@@ -95,9 +100,43 @@ class RuntimeEngine {
   private readonly runRegistries = new Map<string, AgentRegistry>();
   // Handoff/subtask recursion depth per run — prevents infinite delegation loops
   private readonly delegationDepth = new Map<string, number>();
+  private readonly controlService = new RuntimeControlService();
+  private readonly transitionService = new RuntimeTransitionService({
+    nextEventSequence: (runId) => this.nextEventSequence(runId),
+    buildDefaultMessagePayload: (runId, fromNodeId, type, content) =>
+      this.buildDefaultMessagePayload(runId, fromNodeId, type, content),
+    mustNode: (runId, nodeId) => this.mustNode(runId, nodeId),
+    mustContext: (runId, nodeId) => this.mustContext(runId, nodeId),
+    syncRunControl: (runId, patch) => this.controlService.syncRunControl(runId, patch),
+    syncNodeControl: (runId, nodeId, patch) => this.controlService.syncNodeControl(runId, nodeId, patch),
+    ownerKindForRole: (role) => this.controlService.ownerKindForRole(role),
+  });
+  private readonly schedulerService = new RuntimeSchedulerService({
+    executeNode: (runId, nodeId, rerunMode) => this.executeNode(runId, nodeId, rerunMode),
+    transitionNode: (runId, nodeId, to, patch) => this.transitionService.transitionNode(runId, nodeId, to, patch),
+    emit: (runId, type, data) => this.transitionService.emit(runId, type, data),
+    syncRunControl: (runId, patch) => this.controlService.syncRunControl(runId, patch),
+    syncNodeControl: (runId, nodeId, patch) => this.controlService.syncNodeControl(runId, nodeId, patch),
+    recordControlAction: (input) => this.controlService.recordControlAction(input),
+    mustNode: (runId, nodeId) => this.mustNode(runId, nodeId),
+    mustSnapshot: (runId) => this.mustSnapshot(runId),
+  });
+  private readonly nodeExecutionService = new RuntimeNodeExecutionService({
+    readMessageData: (message) => this.readMessageData(message),
+    describeInboundMessage: (message) => this.describeInboundMessage(message),
+    formatHumanMessage: (message) => this.formatHumanMessage(message),
+    getMemoryScope: (runId) => this.getMemoryScope(runId),
+    emit: (runId, type, data) => this.transitionService.emit(runId, type, data),
+  });
   private static readonly MAX_DELEGATION_DEPTH = 5;
 
-  constructor(private readonly adapter: AgentAdapter = new MockAgentAdapter()) {}
+  constructor(private readonly adapter?: AgentAdapter) {}
+
+  private nextEventSequence(runId: string) {
+    const seq = (this.runEventSeq.get(runId) ?? 0) + 1;
+    this.runEventSeq.set(runId, seq);
+    return seq;
+  }
 
   /**
    * 对同一 runId 的操作串行化执行，确保状态机转换不会发生并发竞态。
@@ -123,30 +162,20 @@ class RuntimeEngine {
     nodeId: string,
     resolved: ResolvedAgentExecutionConfig,
   ): AgentAdapter {
-    if (!(this.adapter instanceof MockAgentAdapter)) {
+    if (this.adapter) {
       return this.adapter;
     }
 
-    const provider = (resolved.provider || "").toLowerCase();
-    if (!provider || provider === "mock") {
-      return this.adapter;
-    }
-
-    const baseURL = (resolved.baseUrl || "").trim();
-    const apiKey = (resolved.apiKey || "").trim();
-    if (!baseURL || !apiKey) {
-      return this.adapter;
-    }
-
-    if (provider === "anthropic") {
-      return this.adapter;
-    }
+    const llmConfig = resolveStrictExecutionLLMConfig(
+      resolved,
+      `${resolved.name || nodeId}`,
+    );
 
     return new LLMChatAdapter({
-      provider,
-      baseURL,
-      apiKey,
-      model: resolved.model,
+      provider: llmConfig.provider,
+      baseURL: llmConfig.baseUrl,
+      apiKey: llmConfig.apiKey,
+      model: llmConfig.model,
       runId,
       nodeId,
     });
@@ -256,6 +285,96 @@ class RuntimeEngine {
     });
   }
 
+  private ownerKindForRole(role: NodeRole): ControlOwnerKind {
+    return this.controlService.ownerKindForRole(role);
+  }
+
+  private mapRunStatusToControlState(status: Run["status"]): ControlRunState {
+    return this.controlService.mapRunStatusToControlState(status);
+  }
+
+  private mapNodeStatusToControlState(node: AgentNode): ControlNodeState {
+    return this.controlService.mapNodeStatusToControlState(node);
+  }
+
+  private buildRunBudgetSnapshot(runId: string): ControlBudgetSnapshot {
+    return this.controlService.buildRunBudgetSnapshot(runId);
+  }
+
+  private buildNodeBudgetSnapshot(runId: string, nodeId: string): ControlBudgetSnapshot {
+    return this.controlService.buildNodeBudgetSnapshot(runId, nodeId);
+  }
+
+  private buildRunAllowedActions(runId: string, state: ControlRunState): AllowedControlAction[] {
+    return this.controlService.buildRunAllowedActions(runId, state);
+  }
+
+  private buildNodeAllowedActions(runId: string, node: AgentNode, state: ControlNodeState): AllowedControlAction[] {
+    return this.controlService.buildNodeAllowedActions(runId, node, state);
+  }
+
+  private defaultRunRecoveryPolicy(): ControlRecoveryPolicy {
+    return this.controlService.defaultRunRecoveryPolicy();
+  }
+
+  private defaultNodeRecoveryPolicy(node: AgentNode): ControlRecoveryPolicy {
+    return this.controlService.defaultNodeRecoveryPolicy(node);
+  }
+
+  private buildReplayScope(run: Run | undefined, currentCheckpointId?: string) {
+    return this.controlService.buildReplayScope(run, currentCheckpointId);
+  }
+
+  private syncRunControl(
+    runId: string,
+    patch?: Partial<{
+      state: ControlRunState;
+      ownerKind: ControlOwnerKind;
+      ownerRef: string;
+      activeNodeId?: string;
+      currentCheckpointId?: string;
+    }>,
+  ) {
+    this.controlService.syncRunControl(runId, patch);
+  }
+
+  private syncNodeControl(
+    runId: string,
+    nodeId: string,
+    patch?: Partial<{
+      state: ControlNodeState;
+      ownerKind: ControlOwnerKind;
+      ownerRef: string;
+      approvalRequired: boolean;
+    }>,
+  ) {
+    this.controlService.syncNodeControl(runId, nodeId, patch);
+  }
+
+  private syncAllNodeControls(runId: string) {
+    this.controlService.syncAllNodeControls(runId);
+  }
+
+  private recordControlAction(input: {
+    runId: string;
+    nodeId?: string;
+    actionType: string;
+    targetScope: ControlActionRecord["targetScope"];
+    proposer: string;
+    ownerKind: ControlOwnerKind;
+    status: ControlActionRecord["status"];
+    sideEffectLevel?: ControlActionRecord["sideEffectLevel"];
+    approvalRequired?: boolean;
+    payload?: Record<string, unknown>;
+    recoveryDecision?: ControlActionRecord["recoveryDecision"];
+  }) {
+    this.controlService.recordControlAction(input);
+  }
+
+  private initializeControlPlane(runId: string) {
+    this.controlService.initializeControlPlane(runId);
+  }
+
   createRun(
     task: string,
     workflow?: WorkflowBlueprintInput,
@@ -337,6 +456,7 @@ class RuntimeEngine {
       agentContexts: contexts,
       humanMessages: [],
     });
+    this.initializeControlPlane(blueprint.run.id);
     this.runEventSeq.set(blueprint.run.id, 0);
 
     this.emit(blueprint.run.id, "run_created", {
@@ -391,6 +511,15 @@ class RuntimeEngine {
     });
     this.transitionTask(runId, rootTask.id, "running");
     this.emit(runId, "run_started", { message: "运行已启动" });
+    this.recordControlAction({
+      runId,
+      actionType: "start_run",
+      targetScope: "run",
+      proposer: "runtime",
+      ownerKind: "runtime",
+      status: "succeeded",
+      payload: { trigger: "manual" },
+    });
     this.emit(runId, "execution_phase_changed", {
       relatedTaskId: rootTask.id,
       message: "运行进入阶段：planning",
@@ -499,6 +628,16 @@ class RuntimeEngine {
       relatedNodeId: nodeId,
       relatedTaskId: node.taskId,
       message: `已请求从节点 ${node.name} 重跑`,
+      payload: { includeDownstream },
+    });
+    this.recordControlAction({
+      runId,
+      nodeId,
+      actionType: includeDownstream ? "rerun_node_with_downstream" : "rerun_node",
+      targetScope: includeDownstream ? "subtask" : "node",
+      proposer: "runtime",
+      ownerKind: this.ownerKindForRole(node.role),
+      status: "proposed",
       payload: { includeDownstream },
     });
 
@@ -628,6 +767,30 @@ class RuntimeEngine {
         humanMessage,
       },
     });
+    this.recordControlAction({
+      runId,
+      nodeId,
+      actionType: "submit_human_input",
+      targetScope: "node",
+      proposer: "human",
+      ownerKind: "human",
+      status: "succeeded",
+      payload: {
+        humanMessageId: humanMessage.id,
+        attachmentCount: attachments.length,
+      },
+    });
+    this.syncNodeControl(runId, nodeId, {
+      state: "waiting_input",
+      ownerKind: "human",
+      ownerRef: humanMessage.id,
+    });
+    this.syncRunControl(runId, {
+      state: "waiting_human",
+      ownerKind: "human",
+      ownerRef: humanMessage.id,
+      activeNodeId: nodeId,
+    });
 
     this.emit(runId, "agent_context_updated", {
       relatedNodeId: nodeId,
@@ -700,6 +863,16 @@ class RuntimeEngine {
       relatedTaskId: task.id,
       message: `${node.name} 开始执行${rerunMode ? "（重跑）" : ""}`,
       payload: { executionOrder: node.executionOrder },
+    });
+    this.recordControlAction({
+      runId,
+      nodeId,
+      actionType: rerunMode ? "execute_node_rerun" : "execute_node",
+      targetScope: "node",
+      proposer: "runtime",
+      ownerKind: this.ownerKindForRole(node.role),
+      status: "executing",
+      payload: { rerunMode, executionOrder: node.executionOrder },
     });
     this.emitExecutionPhase(runId, nodeId, task.id, this.phaseFromNodeRole(node.role), {
       source: "node_started",
@@ -870,20 +1043,8 @@ class RuntimeEngine {
       resolvedTools.push(...builtinTools);
     }
 
-    const executionAdapter = this.resolveExecutionAdapter(runId, nodeId, resolved);
-    if (executionAdapter instanceof MockAgentAdapter && resolved.provider && resolved.provider !== "mock") {
-      const reason = resolved.provider === "anthropic"
-        ? "当前适配器仅支持 OpenAI 兼容 chat/completions 协议，Anthropic 尚未接入"
-        : "缺少可用的 baseURL 或 API Key，已回退到 Mock 执行";
-      this.emit(runId, "agent_context_updated", {
-        relatedNodeId: nodeId,
-        relatedTaskId: task.id,
-        message: `${resolved.name} 使用 Mock 执行: ${reason}`,
-        payload: { reason: "adapter_fallback", provider: resolved.provider },
-      });
-    }
-
     try {
+      const executionAdapter = this.resolveExecutionAdapter(runId, nodeId, resolved);
       if (toolResolution.toolPolicy === "required" && resolvedTools.length === 0) {
         throw new Error("节点工具策略为 required，但当前无可用工具。");
       }
@@ -973,6 +1134,8 @@ class RuntimeEngine {
                   completionTokens: cTokens,
                   totalTokens: tTokens,
                 });
+                this.syncNodeControl(runId, nodeId);
+                this.syncRunControl(runId);
               }
               if (ptId) {
                 memoryStore.updatePromptTrace(ptId, {
@@ -1262,7 +1425,6 @@ class RuntimeEngine {
         },
       });
 
-      const runState = memoryStore.getRun(runId);
       const memoryScope = this.getMemoryScope(runId);
       const nodeMemory = longTermMemoryService.remember({
         scopeType: memoryScope.scopeType,
@@ -1376,6 +1538,19 @@ class RuntimeEngine {
           executionOrder: node.executionOrder,
         },
       });
+      this.recordControlAction({
+        runId,
+        nodeId,
+        actionType: "execute_node",
+        targetScope: "node",
+        proposer: "runtime",
+        ownerKind: this.ownerKindForRole(node.role),
+        status: "succeeded",
+        payload: {
+          executionOrder: node.executionOrder,
+          finalOutputLength: (result.finalOutput ?? result.latestOutput ?? "").length,
+        },
+      });
       this.traceDuplicate("[Runtime][exec:end]", {
         runId,
         nodeId,
@@ -1406,6 +1581,20 @@ class RuntimeEngine {
           model: resolved.model,
           baseUrl: resolved.baseUrl,
         },
+      });
+      this.recordControlAction({
+        runId,
+        nodeId,
+        actionType: "execute_node",
+        targetScope: "node",
+        proposer: "runtime",
+        ownerKind: this.ownerKindForRole(node.role),
+        status: "failed",
+        payload: {
+          executionOrder: node.executionOrder,
+          error: message,
+        },
+        recoveryDecision: this.defaultNodeRecoveryPolicy(node).onFailure,
       });
       this.traceDuplicate("[Runtime][exec:error]", {
         runId,
@@ -1450,6 +1639,16 @@ class RuntimeEngine {
       message: `${node.name} 开始执行${rerunMode ? "（重跑）" : ""}`,
       payload: { executionOrder: node.executionOrder, nodeType: "port" },
     });
+    this.recordControlAction({
+      runId,
+      nodeId,
+      actionType: rerunMode ? "execute_port_node_rerun" : "execute_port_node",
+      targetScope: "node",
+      proposer: "runtime",
+      ownerKind: this.ownerKindForRole(node.role),
+      status: "executing",
+      payload: { rerunMode, nodeRole: node.role },
+    });
     this.emitExecutionPhase(runId, nodeId, task.id, this.phaseFromNodeRole(node.role), {
       source: "port_node_started",
       rerunMode,
@@ -1473,6 +1672,17 @@ class RuntimeEngine {
         relatedTaskId: task.id,
         message: `${node.name} 执行失败: ${message}`,
         payload: { blockedReason: message, executionOrder: node.executionOrder },
+      });
+      this.recordControlAction({
+        runId,
+        nodeId,
+        actionType: "execute_port_node",
+        targetScope: "node",
+        proposer: "runtime",
+        ownerKind: this.ownerKindForRole(node.role),
+        status: "failed",
+        payload: { error: message, nodeRole: node.role },
+        recoveryDecision: this.defaultNodeRecoveryPolicy(node).onFailure,
       });
       throw error;
     }
@@ -1533,6 +1743,16 @@ class RuntimeEngine {
       relatedTaskId: task.id,
       message: `${node.name} 执行完成`,
       payload: { output: dispatchContent, executionOrder: node.executionOrder },
+    });
+    this.recordControlAction({
+      runId,
+      nodeId: node.id,
+      actionType: "execute_port_node",
+      targetScope: "node",
+      proposer: "runtime",
+      ownerKind: this.ownerKindForRole(node.role),
+      status: "succeeded",
+      payload: { nodeRole: node.role, outputLength: dispatchContent.length },
     });
   }
 
@@ -1629,6 +1849,16 @@ class RuntimeEngine {
       message: `${node.name} 执行完成`,
       payload: { output: finalText, executionOrder: node.executionOrder },
     });
+    this.recordControlAction({
+      runId,
+      nodeId: node.id,
+      actionType: "execute_port_node",
+      targetScope: "node",
+      proposer: "runtime",
+      ownerKind: this.ownerKindForRole(node.role),
+      status: "succeeded",
+      payload: { nodeRole: node.role, outputLength: finalText.length },
+    });
   }
 
   private createPortDefinition(node: AgentNode): AgentDefinition {
@@ -1677,96 +1907,7 @@ class RuntimeEngine {
     definition: AgentDefinition,
     context: AgentContext,
   ) {
-    const run = memoryStore.getRun(runId);
-    const rootTask = memoryStore.getTasks(runId).find((item) => item.id === run?.rootTaskId);
-    const inbound = context.inboundMessages;
-    const humanMessages = context.humanMessages;
-    console.info("[Runtime][context]", {
-      runId,
-      nodeId: node.id,
-      nodeRole: node.role,
-      provider: definition.provider ?? "mock",
-      model: definition.model ?? "mock-agent-v1",
-      inboundMessagesCount: inbound.length,
-      humanMessagesCount: humanMessages.length,
-      outboundMessagesCount: context.outboundMessages.length,
-    });
-    const inboundHumanMessages = inbound
-      .slice(-12)
-      .map((message) => {
-        const data = this.readMessageData(message);
-        if (typeof data.humanMessage === "string" && data.humanMessage.trim()) {
-          return `${data.humanMessage.trim()} (from ${message.fromNodeId})`;
-        }
-        return null;
-      })
-      .filter((item): item is string => Boolean(item));
-
-    const inboundLines = inbound
-      .slice(-12)
-      .map((message) => `- [${message.type}] ${this.describeInboundMessage(message)}`);
-
-    const explicitHumanLines = humanMessages
-      .slice(-16)
-      .map((message) => this.formatHumanMessage(message));
-    const mergedHumanLines = Array.from(new Set([...explicitHumanLines, ...inboundHumanMessages]));
-
-    const taskTitle = rootTask?.title || context.taskBrief || node.taskBrief || "未提供任务";
-    const memoryScope = this.getMemoryScope(runId);
-    const memoryQuery = [
-      taskTitle,
-      context.taskBrief || node.taskBrief || "",
-      ...inbound.slice(-16).map((message) => this.describeInboundMessage(message)),
-      ...humanMessages.slice(-4).map((message) => message.content),
-    ]
-      .filter(Boolean)
-      .join("\n");
-
-    const memoryHits = longTermMemoryService.search({
-      query: memoryQuery,
-      workspaceId: memoryScope.workspaceId ?? runId,
-      workflowId: memoryScope.workflowId,
-      runId,
-      nodeId: node.id,
-      limit: 8,
-      minScore: 0.15,
-    });
-
-    if (memoryHits.length > 0) {
-      this.emit(runId, "memory_retrieved", {
-        relatedNodeId: node.id,
-        relatedTaskId: node.taskId,
-        message: `${node.name} 已检索到 ${memoryHits.length} 条长期记忆`,
-        payload: {
-          memoryIds: memoryHits.map((item) => item.id),
-          scores: memoryHits.map((item) => Number(item.score.toFixed(4))),
-        },
-      });
-    }
-
-    // Use working memory assembler for dynamic token-budget allocation
-    // Budget scales with model context window (heuristic based on model name)
-    const modelName = (definition.model ?? "").toLowerCase();
-    let tokenBudget = 6000; // Default
-    if (/128k|gpt-4o|claude-3|gemini-1\.5/.test(modelName)) {
-      tokenBudget = 12000;
-    } else if (/32k|gpt-4-turbo/.test(modelName)) {
-      tokenBudget = 10000;
-    } else if (/16k/.test(modelName)) {
-      tokenBudget = 8000;
-    }
-
-    const assembled = assembleContext({
-      tokenBudget,
-      taskTitle,
-      nodeBrief: context.taskBrief || node.taskBrief || "",
-      inboundLines,
-      humanLines: mergedHumanLines,
-      memoryHits,
-      systemPrompt: definition.systemPrompt || "",
-    });
-
-    return assembled.prompt;
+    return this.nodeExecutionService.resolveNodeExecutionInput(runId, node, definition, context);
   }
 
   private applyResolvedInput(
@@ -1966,31 +2107,7 @@ class RuntimeEngine {
   }
 
   private composeSystemPrompt(resolved: ResolvedAgentExecutionConfig) {
-    const parts = [resolved.systemPrompt || ""];
-
-    if (resolved.additionalPrompt) {
-      parts.push(`附加要求:\n${resolved.additionalPrompt}`);
-    }
-
-    if (resolved.promptDocuments.length > 0) {
-      parts.push(
-        `Prompt 资产:\n${resolved.promptDocuments.map((doc) => `# ${doc.name}\n${doc.content}`).join("\n\n")}`,
-      );
-    }
-
-    if (resolved.skillDocuments.length > 0) {
-      parts.push(
-        `Skill 资产:\n${resolved.skillDocuments.map((doc) => `# ${doc.name}\n${doc.content}`).join("\n\n")}`,
-      );
-    }
-
-    if (resolved.referenceDocuments.length > 0) {
-      parts.push(
-        `Reference 资产:\n${resolved.referenceDocuments.map((doc) => `# ${doc.name}\n${doc.content}`).join("\n\n")}`,
-      );
-    }
-
-    return parts.filter(Boolean).join("\n\n");
+    return this.nodeExecutionService.composeSystemPrompt(resolved);
   }
 
   private getRoleDefaults(role: NodeRole) {
@@ -2023,8 +2140,9 @@ class RuntimeEngine {
 
     if (role === "summarizer") {
       return {
-        systemPrompt: "你是总结代理，基于中间结果生成最终输出。",
-        responsibility: "汇总中间结果并给出最终答案。",
+        systemPrompt:
+          "你是总结代理，基于中间结果生成最终输出。必须直接给出完整交付结果，不允许只写“将要做什么/继续分析”。输出应包含结论、关键依据、可执行步骤（如适用）。",
+        responsibility: "汇总中间结果并给出可直接使用的最终答案。",
         inputSchema: "中间结果",
         outputSchema: "最终输出文本",
       };
@@ -2040,28 +2158,16 @@ class RuntimeEngine {
     }
 
     return {
-      systemPrompt: "你是执行类代理，基于上游消息和人工补充要求产出结果。",
-      responsibility: "执行任务并输出可供下游消费的结果。",
+      systemPrompt:
+        "你是执行类代理，基于上游消息和人工补充要求产出结果。必须输出可交付内容，不得只停留在分析过程或意图说明。若任务是“方案/文档/计划”，请直接给出完整结构化正文。",
+      responsibility: "执行任务并输出可供下游直接消费的结果。",
       inputSchema: "任务书 + 人工消息",
       outputSchema: "中间结果文本",
     };
   }
 
   private buildInitialContext(runId: string, node: AgentNode, definition: AgentDefinition): AgentContext {
-    return {
-      id: node.contextId ?? makeId("agent_ctx"),
-      nodeId: node.id,
-      runId,
-      systemPrompt: definition.systemPrompt,
-      taskBrief: node.taskBrief,
-      inboundMessages: [],
-      outboundMessages: [],
-      resolvedInput: "",
-      humanMessages: [],
-      recentOutputs: [],
-      latestSummary: undefined,
-      updatedAt: nowIso(),
-    };
+    return this.nodeExecutionService.buildInitialContext(runId, node, definition);
   }
 
   private createBlueprintFromWorkflow(task: string, workflow: WorkflowBlueprintInput) {
@@ -2276,71 +2382,7 @@ class RuntimeEngine {
   }
 
   private buildDagInfo(runId: string): DagInfo {
-    const nodes = memoryStore.getNodes(runId);
-    const edges = memoryStore.getEdges(runId);
-    const nodeIds = new Set(nodes.map((node) => node.id));
-
-    // Separate loop_back edges from forward edges
-    const loopBackEdges: LoopBackEdge[] = [];
-    const forwardEdges: typeof edges = [];
-    for (const edge of edges) {
-      if (!nodeIds.has(edge.sourceNodeId) || !nodeIds.has(edge.targetNodeId)) {
-        continue;
-      }
-      if (edge.type === "loop_back") {
-        loopBackEdges.push({
-          id: edge.id,
-          sourceNodeId: edge.sourceNodeId,
-          targetNodeId: edge.targetNodeId,
-          maxIterations: edge.maxIterations ?? 3,
-          convergenceKeyword: edge.convergenceKeyword,
-        });
-      } else {
-        forwardEdges.push(edge);
-      }
-    }
-
-    const incoming = new Map<string, string[]>(nodes.map((node) => [node.id, []]));
-    const outgoing = new Map<string, string[]>(nodes.map((node) => [node.id, []]));
-    const indegree = new Map<string, number>(nodes.map((node) => [node.id, 0]));
-
-    for (const edge of forwardEdges) {
-      outgoing.set(edge.sourceNodeId, [...(outgoing.get(edge.sourceNodeId) ?? []), edge.targetNodeId]);
-      incoming.set(edge.targetNodeId, [...(incoming.get(edge.targetNodeId) ?? []), edge.sourceNodeId]);
-      indegree.set(edge.targetNodeId, (indegree.get(edge.targetNodeId) ?? 0) + 1);
-    }
-
-    const queue = nodes
-      .filter((node) => (indegree.get(node.id) ?? 0) === 0)
-      .map((node) => node.id);
-    const orderedNodeIds: string[] = [];
-
-    while (queue.length > 0) {
-      const current = queue.shift() as string;
-      orderedNodeIds.push(current);
-      for (const next of outgoing.get(current) ?? []) {
-        const left = (indegree.get(next) ?? 0) - 1;
-        indegree.set(next, left);
-        if (left === 0) {
-          queue.push(next);
-        }
-      }
-    }
-
-    if (orderedNodeIds.length !== nodes.length) {
-      const cyclicNodes = nodes
-        .map((node) => node.id)
-        .filter((nodeId) => !orderedNodeIds.includes(nodeId));
-      throw new Error(`工作流存在环路，无法按 DAG 执行（请使用回环连线标记循环边）: ${cyclicNodes.join(", ")}`);
-    }
-
-    return {
-      orderedNodeIds,
-      orderMap: new Map(orderedNodeIds.map((nodeId, index) => [nodeId, index + 1])),
-      incoming,
-      outgoing,
-      loopBackEdges,
-    };
+    return this.schedulerService.buildDagInfo(runId);
   }
 
   private async executeDagSchedule(
@@ -2352,157 +2394,18 @@ class RuntimeEngine {
     /** For recovery: set of already-completed node IDs to skip */
     alreadyCompleted?: Set<string>,
   ) {
-    const runMode = this.mustSnapshot(runId).run.runMode ?? "standard";
-    const pendingDependencies = new Map<string, number>();
-    const executed = new Set<string>(alreadyCompleted ?? []);
-    let readyWave: string[] = [];
-    let waveIndex = 0;
-
-    for (const nodeId of dag.orderedNodeIds) {
-      if (!scope.has(nodeId)) {
-        continue;
-      }
-      // For recovery: completed nodes count as resolved dependencies
-      const deps = (dag.incoming.get(nodeId) ?? []).filter(
-        (dep) => scope.has(dep) && !executed.has(dep),
-      ).length;
-      pendingDependencies.set(nodeId, deps);
-    }
-
-    for (const nodeId of dag.orderedNodeIds) {
-      if (!scope.has(nodeId) || executed.has(nodeId)) {
-        continue;
-      }
-      const deps = pendingDependencies.get(nodeId) ?? 0;
-      if (deps === 0) {
-        this.markNodeReady(runId, nodeId, dag.orderMap, rerunMode);
-        readyWave.push(nodeId);
-      } else {
-        this.markNodeWaiting(runId, nodeId, dag, scope, executed, deps);
-      }
-    }
-
-    while (readyWave.length > 0) {
-      const currentWave = [...readyWave];
-      readyWave = [];
-      waveIndex++;
-
-      for (const nodeId of currentWave) {
-        const node = this.mustNode(runId, nodeId);
-        if (!rerunMode) {
-          continue;
-        }
-        if (nodeId === rerunStartNodeId) {
-          this.emit(runId, "node_rerun_started", {
-            relatedNodeId: node.id,
-            relatedTaskId: node.taskId,
-            message: `节点重跑开始: ${node.name}`,
-            payload: { executionOrder: node.executionOrder },
-          });
-        } else {
-          this.emit(runId, "downstream_rerun_started", {
-            relatedNodeId: node.id,
-            relatedTaskId: node.taskId,
-            message: `下游节点重跑开始: ${node.name}`,
-            payload: { executionOrder: node.executionOrder },
-          });
-        }
-      }
-
-      // ── Durable: checkpoint each node as "running" before execution ──
-      for (const nodeId of currentWave) {
-        durableScheduler.checkpointNodeStarted(runId, nodeId, waveIndex);
-      }
-
-      if (runMode === "standard") {
-        await Promise.all(currentWave.map(async (item) => {
-          try {
-            await this.executeNode(runId, item, rerunMode);
-            // ── Durable: checkpoint node completed ──
-            durableScheduler.checkpointNodeCompleted(runId, item, waveIndex);
-          } catch (nodeError) {
-            // ── Durable: checkpoint node failed ──
-            const errMsg = nodeError instanceof Error ? nodeError.message : "执行异常";
-            durableScheduler.checkpointNodeFailed(runId, item, waveIndex, errMsg);
-            throw nodeError;
-          }
-        }));
-      } else {
-        for (const item of currentWave) {
-          try {
-            await this.executeNode(runId, item, rerunMode);
-            durableScheduler.checkpointNodeCompleted(runId, item, waveIndex);
-          } catch (nodeError) {
-            const errMsg = nodeError instanceof Error ? nodeError.message : "执行异常";
-            durableScheduler.checkpointNodeFailed(runId, item, waveIndex, errMsg);
-            throw nodeError;
-          }
-        }
-      }
-
-      for (const nodeId of currentWave) {
-        executed.add(nodeId);
-      }
-
-      // ── Durable: persist schedule progress after each wave ──
-      try {
-        const pendingObj: Record<string, number> = {};
-        for (const [k, v] of pendingDependencies) pendingObj[k] = v;
-        durableScheduler.saveScheduleState({
-          runId,
-          dagJson: JSON.stringify(DurableScheduler.serializeDag(dag)),
-          scopeJson: JSON.stringify([...scope]),
-          executedJson: JSON.stringify([...executed]),
-          pendingDependenciesJson: JSON.stringify(pendingObj),
-          currentWaveIndex: waveIndex,
-          rerunMode,
-          rerunStartNodeId,
-          status: "active",
-          createdAt: nowIso(),
-          updatedAt: nowIso(),
-        });
-      } catch { /* non-fatal: schedule state update failure should not break execution */ }
-
-      for (const nodeId of currentWave) {
-        for (const next of dag.outgoing.get(nodeId) ?? []) {
-          if (!scope.has(next) || executed.has(next)) {
-            continue;
-          }
-          const left = (pendingDependencies.get(next) ?? 0) - 1;
-          pendingDependencies.set(next, left);
-
-          if (left <= 0) {
-            this.markNodeReady(runId, next, dag.orderMap, rerunMode);
-            if (!readyWave.includes(next)) {
-              readyWave.push(next);
-            }
-          } else {
-            this.markNodeWaiting(runId, next, dag, scope, executed, left);
-          }
-        }
-      }
-    }
-
-    if (executed.size !== scope.size) {
-      const remaining = Array.from(scope).filter((nodeId) => !executed.has(nodeId));
-      throw new Error(`DAG 调度未完成，仍有节点未执行: ${remaining.join(", ")}`);
-    }
+    await this.schedulerService.executeDagSchedule(
+      runId,
+      dag,
+      scope,
+      rerunMode,
+      rerunStartNodeId,
+      alreadyCompleted,
+    );
   }
 
   private markNodeReady(runId: string, nodeId: string, orderMap: Map<string, number>, rerunMode: boolean) {
-    const executionOrder = orderMap.get(nodeId);
-    const node = this.mustNode(runId, nodeId);
-    this.transitionNode(runId, nodeId, "ready", {
-      blockedReason: undefined,
-      error: undefined,
-      executionOrder,
-    });
-    this.emit(runId, "node_ready", {
-      relatedNodeId: nodeId,
-      relatedTaskId: node.taskId,
-      message: `${node.name} 已就绪`,
-      payload: { executionOrder, rerunMode },
-    });
+    this.schedulerService.markNodeReady(runId, nodeId, orderMap, rerunMode);
   }
 
   private markNodeWaiting(
@@ -2513,60 +2416,15 @@ class RuntimeEngine {
     executed: Set<string>,
     pendingCount: number,
   ) {
-    const unresolved = (dag.incoming.get(nodeId) ?? [])
-      .filter((dep) => scope.has(dep) && !executed.has(dep))
-      .map((dep) => this.mustNode(runId, dep).name);
-    const blockedReason = unresolved.length > 0 ? `等待上游节点完成: ${unresolved.join(", ")}` : "等待依赖完成";
-    const node = this.mustNode(runId, nodeId);
-    const executionOrder = dag.orderMap.get(nodeId);
-
-    this.transitionNode(runId, nodeId, "waiting", {
-      blockedReason,
-      executionOrder,
-    });
-    this.emit(runId, "node_waiting", {
-      relatedNodeId: nodeId,
-      relatedTaskId: node.taskId,
-      message: `${node.name} 等待依赖`,
-      payload: {
-        blockedReason,
-        pendingDependencies: pendingCount,
-        executionOrder,
-        unresolved,
-      },
-    });
+    this.schedulerService.markNodeWaiting(runId, nodeId, dag, scope, executed, pendingCount);
   }
 
   private getExecutionOrder(runId: string): AgentNode[] {
-    const dag = this.buildDagInfo(runId);
-    return dag.orderedNodeIds.map((id) => this.mustNode(runId, id));
+    return this.schedulerService.getExecutionOrder(runId);
   }
 
   private getRerunChain(runId: string, dag: DagInfo, startNodeId: string, includeDownstream: boolean): AgentNode[] {
-    if (!dag.orderedNodeIds.includes(startNodeId)) {
-      throw new Error("未找到重跑起点节点");
-    }
-
-    if (!includeDownstream) {
-      return [this.mustNode(runId, startNodeId)];
-    }
-
-    const reachable = new Set<string>([startNodeId]);
-    const queue = [startNodeId];
-    while (queue.length > 0) {
-      const current = queue.shift() as string;
-      for (const next of dag.outgoing.get(current) ?? []) {
-        if (reachable.has(next)) {
-          continue;
-        }
-        reachable.add(next);
-        queue.push(next);
-      }
-    }
-
-    return dag.orderedNodeIds
-      .filter((nodeId) => reachable.has(nodeId))
-      .map((nodeId) => this.mustNode(runId, nodeId));
+    return this.schedulerService.getRerunChain(runId, dag, startNodeId, includeDownstream);
   }
 
   private sendMessage(
@@ -2578,174 +2436,27 @@ class RuntimeEngine {
     relatedTaskId?: string,
     payload?: Message["payload"],
   ): Message {
-    const message: Message = {
-      id: makeId("msg"),
-      runId,
-      fromNodeId,
-      toNodeId,
-      type,
-      content,
-      payload: payload ?? this.buildDefaultMessagePayload(runId, fromNodeId, type, content),
-      createdAt: nowIso(),
-    };
-
-    memoryStore.appendMessage(runId, message);
-    this.updateNode(runId, fromNodeId, {
-      outboundMessages: [...(this.mustNode(runId, fromNodeId).outboundMessages ?? []), message].slice(-30),
-    });
-
-    const sourceContext = memoryStore.getAgentContextByNode(runId, fromNodeId);
-    if (sourceContext) {
-      memoryStore.updateAgentContext(runId, sourceContext.id, (current) => ({
-        ...current,
-        outboundMessages: [...(current.outboundMessages ?? []), message].slice(-30),
-        updatedAt: nowIso(),
-      }));
-      const refreshedSourceContext = this.mustContext(runId, fromNodeId);
-
-      this.emit(runId, "agent_context_updated", {
-        relatedNodeId: fromNodeId,
-        relatedTaskId,
-        message: `节点 ${fromNodeId} 发送消息`,
-        payload: {
-          reason: "message",
-          contextPatch: {
-            outboundMessages: refreshedSourceContext.outboundMessages.slice(-30),
-          },
-        },
-      });
-    }
-
-    if (type === "task_assignment") {
-      this.emit(runId, "task_assigned", {
-        relatedNodeId: toNodeId,
-        relatedTaskId,
-        message: `任务已分配到节点 ${toNodeId}`,
-      });
-    }
-
-    this.emit(runId, "message_sent", {
-      relatedNodeId: toNodeId,
-      relatedTaskId,
-      message: `消息已发送: ${fromNodeId} -> ${toNodeId}`,
-      payload: {
-        messageId: message.id,
-        messageType: message.type,
-        fromNodeId,
-        toNodeId,
-        content: message.content,
-        message,
-      },
-    });
-
-    const targetContext = memoryStore.getAgentContextByNode(runId, toNodeId);
-    if (targetContext) {
-      memoryStore.updateAgentContext(runId, targetContext.id, (current) => ({
-        ...current,
-        inboundMessages: [...current.inboundMessages, message].slice(-30),
-        updatedAt: nowIso(),
-      }));
-      const refreshedTargetContext = this.mustContext(runId, toNodeId);
-
-      this.updateNode(runId, toNodeId, {
-        inboundMessages: [...(this.mustNode(runId, toNodeId).inboundMessages ?? []), message].slice(-30),
-      });
-
-      this.emit(runId, "agent_context_updated", {
-        relatedNodeId: toNodeId,
-        message: `节点 ${toNodeId} 收到新消息`,
-        payload: {
-          reason: "message",
-          contextPatch: {
-            inboundMessages: refreshedTargetContext.inboundMessages.slice(-30),
-          },
-        },
-      });
-
-      this.emit(runId, "message_delivered", {
-        relatedNodeId: toNodeId,
-        relatedTaskId,
-        message: `消息已投递到节点 ${toNodeId}`,
-        payload: {
-          message,
-        },
-      });
-    }
-
-    return message;
+    return this.transitionService.sendMessage(runId, fromNodeId, toNodeId, type, content, relatedTaskId, payload);
   }
 
   private transitionRun(runId: string, to: Run["status"], patch?: Partial<Run>) {
-    const run = memoryStore.getRun(runId);
-    if (!run) {
-      throw new Error("运行不存在");
-    }
-
-    const status = run.status === to ? to : stateMachine.run(run.status, to);
-    memoryStore.updateRun(runId, (current) => ({
-      ...current,
-      status,
-      startedAt: to === "running" ? current.startedAt ?? nowIso() : current.startedAt,
-      ...patch,
-    }));
+    return this.transitionService.transitionRun(runId, to, patch);
   }
 
   private transitionTask(runId: string, taskId: string, to: TaskStatus) {
-    const task = this.getTask(runId, taskId);
-    const status = task.status === to ? to : stateMachine.task(task.status, to);
-    memoryStore.updateTask(runId, taskId, (current) => ({ ...current, status }));
+    return this.transitionService.transitionTask(runId, taskId, to);
   }
 
   private transitionNode(runId: string, nodeId: string, to: NodeStatus, patch?: Partial<AgentNode>) {
-    const node = memoryStore.getNodeById(runId, nodeId);
-    if (!node) {
-      throw new Error("节点不存在");
-    }
-
-    const status = node.status === to ? to : stateMachine.node(node.status, to);
-    memoryStore.updateNode(runId, nodeId, (current) => ({
-      ...current,
-      status,
-      updatedAt: nowIso(),
-      ...patch,
-    }));
+    return this.transitionService.transitionNode(runId, nodeId, to, patch);
   }
 
   private updateNode(runId: string, nodeId: string, patch: Partial<AgentNode>) {
-    memoryStore.updateNode(runId, nodeId, (current) => ({
-      ...current,
-      ...patch,
-      updatedAt: nowIso(),
-    }));
+    this.transitionService.updateNode(runId, nodeId, patch);
   }
 
   private emit(runId: string, type: EventType, data: Omit<Event, "id" | "runId" | "type" | "timestamp">) {
-    const seq = (this.runEventSeq.get(runId) ?? 0) + 1;
-    this.runEventSeq.set(runId, seq);
-    const event: Event = {
-      id: makeId("event"),
-      runId,
-      type,
-      timestamp: nowIso(),
-      runEventSeq: seq,
-      ...data,
-    };
-
-    memoryStore.appendEvent(runId, event);
-    eventStreamHub.publish(runId, event);
-
-    // Fire-and-forget notification for terminal run events
-    if (type === "run_completed" || type === "run_failed") {
-      const run = memoryStore.getRun(runId);
-      notificationService
-        .notifyRunEvent(runId, type, {
-          runName: run?.name,
-          status: run?.status,
-          finishedAt: event.timestamp,
-          ...(data as Record<string, unknown>),
-        })
-        .catch((err) => console.warn("[Runtime] Notification dispatch failed:", err instanceof Error ? err.message : err));
-    }
+    this.transitionService.emit(runId, type, data);
   }
 
   private getTaskByNode(runId: string, nodeId: string): Task {
@@ -3123,6 +2834,18 @@ class RuntimeEngine {
         completedCount: completedNodeIds.size,
         remainingCount: remainingScope.size,
         totalCount: scope.size,
+      },
+    });
+    this.recordControlAction({
+      runId,
+      actionType: "resume_run",
+      targetScope: "run",
+      proposer: "runtime",
+      ownerKind: "runtime",
+      status: "succeeded",
+      payload: {
+        completedCount: completedNodeIds.size,
+        remainingCount: remainingScope.size,
       },
     });
 

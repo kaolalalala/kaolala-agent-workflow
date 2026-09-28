@@ -20,6 +20,9 @@ export interface TodoPlanningContext {
       name: string;
       description?: string;
       guide_content?: string;
+      /** Planner-facing hint: partitioning strategy, parallelism constraints, per-call capacity. */
+      planning_hint?: string;
+      runtime_profile_id?: string;
       output_description?: string;
     }>;
   };
@@ -96,6 +99,7 @@ export interface TodoExecutionContext {
       name: string;
       description?: string;
       guide_content?: string;
+      runtime_profile_id?: string;
       output_description?: string;
     }>;
   };
@@ -218,6 +222,7 @@ export interface DelegationBrief {
       name: string;
       description?: string;
       guide_content?: string;
+      runtime_profile_id?: string;
       output_description?: string;
     }>;
   };

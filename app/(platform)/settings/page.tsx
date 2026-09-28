@@ -131,6 +131,12 @@ export default function SettingsPage() {
   const [message, setMessage] = useState("");
   const [credentials, setCredentials] = useState<CredentialSummary[]>([]);
   const [projects, setProjects] = useState<ProjectSummaryView[]>([]);
+  const [creatingCredential, setCreatingCredential] = useState(false);
+  const [credentialDraft, setCredentialDraft] = useState({
+    provider: "",
+    label: "",
+    apiKey: "",
+  });
   const [form, setForm] = useState<GlobalForm>({
     defaultProvider: "",
     defaultModel: "",
@@ -211,11 +217,36 @@ export default function SettingsPage() {
       setForm(toForm(payload.workspace));
       const projectsPayload = await runtimeClient.listProjects({ includeArchived: true });
       setProjects(projectsPayload.projects);
-      setMessage("Global Settings 已保存。");
+      setMessage("全局设置已保存。");
     } catch (err) {
       setError(err instanceof Error ? err.message : "保存全局设置失败");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const onCreateCredential = async () => {
+    const provider = credentialDraft.provider.trim();
+    const label = credentialDraft.label.trim();
+    const apiKey = credentialDraft.apiKey.trim();
+    if (!provider || !label || !apiKey) {
+      setError("新增凭证时 provider、label、apiKey 不能为空。");
+      return;
+    }
+    setCreatingCredential(true);
+    setError("");
+    setMessage("");
+    try {
+      const created = await runtimeClient.createCredential({ provider, label, apiKey });
+      const refreshed = await runtimeClient.listCredentials();
+      setCredentials(refreshed.credentials);
+      setForm((prev) => ({ ...prev, defaultCredentialId: created.credentialId }));
+      setCredentialDraft((prev) => ({ ...prev, apiKey: "" }));
+      setMessage(`凭证创建成功，ID: ${created.credentialId}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "创建凭证失败");
+    } finally {
+      setCreatingCredential(false);
     }
   };
 
@@ -279,10 +310,10 @@ export default function SettingsPage() {
       <section className={cardClass}>
         <h2 className="flex items-center gap-2 text-lg font-semibold text-slate-900">
           <Save className="h-5 w-5 text-indigo-500" />
-          Global Settings
+          全局设置
         </h2>
         <p className="mt-1 text-sm text-slate-500">
-          平台级默认模型配置。继承关系：Global → Project → Workflow → Node。
+          平台级默认模型配置。继承关系：全局 → 项目 → 工作流 → 节点。
         </p>
 
         {loading ? (
@@ -343,6 +374,60 @@ export default function SettingsPage() {
                 />
               </label>
             </div>
+
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <p className="text-sm font-medium text-slate-800">新增凭证（API Key 可见输入）</p>
+              <p className="mt-1 text-xs text-slate-500">这里不再使用隐藏模式，方便你确认是否输入成功。</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-3">
+                <label className="space-y-1 text-sm">
+                  <span className="text-slate-700">provider</span>
+                  <input
+                    value={credentialDraft.provider}
+                    onChange={(e) => setCredentialDraft((p) => ({ ...p, provider: e.target.value }))}
+                    className={inputClass}
+                    placeholder="如 minimax"
+                  />
+                </label>
+                <label className="space-y-1 text-sm">
+                  <span className="text-slate-700">label</span>
+                  <input
+                    value={credentialDraft.label}
+                    onChange={(e) => setCredentialDraft((p) => ({ ...p, label: e.target.value }))}
+                    className={inputClass}
+                    placeholder="如 minimax-main"
+                  />
+                </label>
+                <label className="space-y-1 text-sm">
+                  <span className="text-slate-700">API Key</span>
+                  <input
+                    type="text"
+                    value={credentialDraft.apiKey}
+                    onChange={(e) => setCredentialDraft((p) => ({ ...p, apiKey: e.target.value }))}
+                    className={inputClass}
+                    placeholder="明文输入"
+                  />
+                </label>
+              </div>
+              <div className="mt-3 flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => void onCreateCredential()}
+                  disabled={creatingCredential}
+                  className="inline-flex h-9 items-center gap-2 rounded-xl bg-slate-900 px-3 text-xs font-medium text-white transition hover:bg-slate-800 disabled:opacity-60"
+                >
+                  {creatingCredential ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                  创建凭证
+                </button>
+                <span className="text-xs text-slate-500">已加载凭证：{credentials.length}</span>
+              </div>
+              {credentials.length > 0 ? (
+                <p className="mt-2 text-xs text-slate-600">
+                  最新凭证：{credentials[0].label} · {credentials[0].provider} · {credentials[0].hasApiKey ? "Key已保存" : "Key缺失"}
+                  {credentials[0].apiKeyPreview ? ` (${credentials[0].apiKeyPreview})` : ""}
+                </p>
+              ) : null}
+            </div>
+
             <button
               type="button"
               onClick={() => void onSave()}
@@ -649,15 +734,15 @@ export default function SettingsPage() {
 
       {/* ── Project inheritance preview ── */}
       <section className={cardClass}>
-        <h2 className="text-base font-semibold text-slate-900">Project 继承预览（Global → Project）</h2>
-        <p className="mt-1 text-sm text-slate-500">当 Project 未设置默认值时，使用 Global 默认值。</p>
+        <h2 className="text-base font-semibold text-slate-900">项目继承预览（全局 → 项目）</h2>
+        <p className="mt-1 text-sm text-slate-500">当项目未设置默认值时，使用全局默认值。</p>
         <div className="mt-3 overflow-x-auto">
           <table className="min-w-full text-left text-sm">
             <thead>
               <tr className="border-b border-slate-200 text-slate-500">
                 <th className="px-3 py-2 font-medium">项目</th>
-                <th className="px-3 py-2 font-medium">Project 配置</th>
-                <th className="px-3 py-2 font-medium">Effective</th>
+                <th className="px-3 py-2 font-medium">项目配置</th>
+                <th className="px-3 py-2 font-medium">生效结果</th>
               </tr>
             </thead>
             <tbody>

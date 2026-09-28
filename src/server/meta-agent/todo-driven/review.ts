@@ -3,6 +3,7 @@ import type { MemoryState } from "../memory-state";
 import { selectReviewMemories } from "../memory-state";
 import { sanitizeJsonLikeText } from "../text-cleaner";
 import type { TodoItem } from "../supervisor-runtime-state";
+import { buildReviewProfilePromptBlock, runReviewProfile } from "./review-profiles";
 import type { TodoExecutionContext, TodoExecutorResult, TodoReviewResult } from "./types";
 
 /* ------------------------------------------------------------------ */
@@ -154,6 +155,7 @@ function buildReviewPrompt(
     "You are a strict quality reviewer for a todo execution system.",
     "Judge whether the executor's output satisfies each acceptance criterion.",
     "",
+    buildReviewProfilePromptBlock(todo, context),
     "## Todo",
     `Title: ${todo.title}`,
     `Description: ${todo.description}`,
@@ -163,7 +165,7 @@ function buildReviewPrompt(
     "",
     "## Executor Output",
     `Summary: ${executorResult.summary ?? "(none)"}`,
-    `Full Output (truncated to 3000 chars):`,
+    "Full Output (truncated to 3000 chars):",
     (executorResult.output ?? "").slice(0, 3000),
     "",
     evidence ? `## Criteria Evidence Provided by Executor\n${evidence}` : "",
@@ -176,25 +178,25 @@ function buildReviewPrompt(
     "Consider semantic meaning, not just word overlap.",
     "",
     "Then decide the overall verdict:",
-    "- \"pass\": ALL criteria satisfied",
-    "- \"revise\": some criteria missing but fixable with another attempt",
-    "- \"split\": the todo is too broad and should be broken into subtasks",
-    "- \"fail\": most criteria unsatisfied or output is fundamentally off-track",
+    '- "pass": ALL criteria satisfied',
+    '- "revise": some criteria missing but fixable with another attempt',
+    '- "split": the todo is too broad and should be broken into subtasks',
+    '- "fail": most criteria unsatisfied or output is fundamentally off-track',
     "",
     "Return ONLY valid JSON in this exact schema:",
     "{",
-    "  \"criteria_judgments\": [",
+    '  "criteria_judgments": [',
     "    {",
-    "      \"criterion\": \"the criterion text\",",
-    "      \"satisfied\": true/false,",
-    "      \"confidence\": 0.0-1.0,",
-    "      \"reason\": \"brief explanation\"",
+    '      "criterion": "the criterion text",',
+    '      "satisfied": true/false,',
+    '      "confidence": 0.0-1.0,',
+    '      "reason": "brief explanation"',
     "    }",
     "  ],",
-    "  \"overall_verdict\": \"pass|revise|split|fail\",",
-    "  \"overall_reason\": \"brief explanation of overall judgment\",",
-    "  \"should_split\": false,",
-    "  \"split_reason\": \"only if should_split is true\"",
+    '  "overall_verdict": "pass|revise|split|fail",',
+    '  "overall_reason": "brief explanation of overall judgment",',
+    '  "should_split": false,',
+    '  "split_reason": "only if should_split is true"',
     "}",
   ].join("\n");
 }
@@ -256,18 +258,13 @@ function llmJudgmentToReviewResult(
     .filter((j) => !j.satisfied)
     .map((j) => j.criterion || "unknown criterion");
 
-  // Reconcile: if LLM says pass but has unsatisfied criteria, downgrade.
-  // Use absolute count thresholds instead of ratio so single-criterion todos are
-  // handled correctly: 1 missing out of 1 total must be "fail", not "revise".
   let status = judgment.overall_verdict;
   if (status === "pass" && missingCriteria.length > 0) {
     const totalCriteria = Math.max(1, todo.acceptance_criteria.length);
     const missingRatio = missingCriteria.length / totalCriteria;
-    // Fail when all or nearly all criteria are missing, or when the single criterion failed.
     status = (missingCriteria.length >= totalCriteria || missingRatio >= 0.6) ? "fail" : "revise";
   }
 
-  // If LLM says split, honor it
   if (judgment.should_split && status !== "pass") {
     status = "split";
   }
@@ -290,6 +287,12 @@ function llmJudgmentToReviewResult(
   };
 }
 
+const REVIEW_SYSTEM_PROMPT =
+  "You are a strict quality reviewer. " +
+  "You MUST respond with ONLY a valid JSON object 鈥?no markdown, no prose, no <think> blocks, no explanations before or after. " +
+  "Your entire response must start with '{' and end with '}'. " +
+  "Required shape: {\"criteria_judgments\":[{\"criterion\":string,\"satisfied\":bool,\"confidence\":number,\"reason\":string}],\"overall_verdict\":\"pass\"|\"revise\"|\"fail\",\"overall_reason\":string}";
+
 async function llmReview(
   todo: TodoItem,
   executorResult: TodoExecutorResult,
@@ -297,15 +300,35 @@ async function llmReview(
   memoryState?: MemoryState,
 ): Promise<TodoReviewResult> {
   const prompt = buildReviewPrompt(todo, executorResult, context, memoryState);
-
-  const llmResult = await callLLMWithUsage([
-    { role: "system", content: "You are a strict JSON-only quality reviewer. Return only valid JSON." },
+  const messages: Parameters<typeof callLLMWithUsage>[0] = [
+    { role: "system", content: REVIEW_SYSTEM_PROMPT },
     { role: "user", content: prompt },
-  ]);
+  ];
 
-  const judgment = tryParseReviewJson(llmResult.content);
+  const llmResult = await callLLMWithUsage(messages);
+  let judgment = tryParseReviewJson(llmResult.content);
+
   if (!judgment) {
-    throw new Error(`LLM review returned unparseable response: ${llmResult.content.slice(0, 200)}`);
+    const retryResult = await callLLMWithUsage([
+      ...messages,
+      { role: "assistant", content: llmResult.content },
+      {
+        role: "user",
+        content:
+          "Your previous response was not valid JSON. " +
+          "Reply now with ONLY the JSON object, starting with '{' and ending with '}'. No other text.",
+      },
+    ]);
+    judgment = tryParseReviewJson(retryResult.content);
+    if (!judgment) {
+      throw new Error(`LLM review returned unparseable response: ${llmResult.content.slice(0, 200)}`);
+    }
+    llmResult.usage = {
+      prompt_tokens: llmResult.usage.prompt_tokens + retryResult.usage.prompt_tokens,
+      completion_tokens: llmResult.usage.completion_tokens + retryResult.usage.completion_tokens,
+      total_tokens: llmResult.usage.total_tokens + retryResult.usage.total_tokens,
+      source: llmResult.usage.source,
+    };
   }
 
   return llmJudgmentToReviewResult(judgment, todo, llmResult.usage);
@@ -315,24 +338,12 @@ async function llmReview(
 /*  Public API: strict LLM review; heuristic only when explicitly forced */
 /* ------------------------------------------------------------------ */
 
-/**
- * Review executor output against acceptance criteria.
- *
- * Strategy: use LLM-as-Judge by default.
- * Heuristic review is only allowed when tests or diagnostics explicitly force it.
- *
- * `pass`: all criteria satisfied
- * `revise`: partially satisfied
- * `fail`: mostly unsatisfied or executor hard error
- * `split`: too broad, should be broken into subtasks
- */
 export async function reviewTodoExecution(
   todo: TodoItem,
   executorResult: TodoExecutorResult,
   context: TodoExecutionContext,
   options?: { memoryState?: MemoryState; forceHeuristic?: boolean },
 ): Promise<TodoReviewResult> {
-  // Fast path: force_split from executor
   if (executorResult.force_split) {
     return {
       status: "split",
@@ -341,7 +352,6 @@ export async function reviewTodoExecution(
     };
   }
 
-  // Fast path: executor error
   if (executorResult.status === "error") {
     return {
       status: "fail",
@@ -350,7 +360,11 @@ export async function reviewTodoExecution(
     };
   }
 
-  // No criteria to check → pass
+  const profileReview = runReviewProfile(todo, executorResult, context);
+  if (profileReview) {
+    return profileReview;
+  }
+
   if (todo.acceptance_criteria.length === 0) {
     return {
       status: "pass",

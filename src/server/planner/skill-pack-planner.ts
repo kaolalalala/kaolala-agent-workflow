@@ -1,9 +1,10 @@
-import { createHash } from "node:crypto";
+﻿import { createHash } from "node:crypto";
 
 import JSZip from "jszip";
 
 import type { StoredWorkflowEdge, StoredWorkflowNode, StoredWorkflowTask } from "@/server/domain";
 import { configService } from "@/server/config/config-service";
+import { resolveStrictWorkspaceLLMConfig } from "@/server/config/strict-llm-config";
 
 type RuntimeNodeRole =
   | "planner"
@@ -727,13 +728,7 @@ async function planWithLLM(
   fallback: SkillPackWorkflowDraft,
 ): Promise<SkillPackWorkflowDraft> {
   const workspace = configService.ensureWorkspaceConfig();
-  const provider = (workspace.defaultProvider || "mock").trim().toLowerCase();
-  const baseURL = (workspace.defaultBaseUrl || "").trim();
-  const model = (workspace.defaultModel || "").trim();
-  const apiKey = configService.resolveCredentialApiKey(workspace.defaultCredentialId);
-  if (!baseURL || !model || !apiKey || provider === "mock") {
-    throw new Error("未配置有效的大模型服务，请先在设置中配置提供商信息。");
-  }
+  const { baseUrl: baseURL, model, apiKey } = resolveStrictWorkspaceLLMConfig();
 
   const systemPrompt = [
     "你是 Workflow Planner。",
@@ -909,12 +904,8 @@ export async function planWorkflowFromSkillPack(options: {
   let planner: "llm" | "heuristic" = "heuristic";
 
   if (options.preferLlm !== false) {
-    try {
-      draft = await planWithLLM(roleSummaries, heuristicDraft);
-      planner = "llm";
-    } catch (error) {
-      warnings.push(error instanceof Error ? error.message : "LLM 规划失败，已回退至启发式方案。");
-    }
+    draft = await planWithLLM(roleSummaries, heuristicDraft);
+    planner = "llm";
   }
 
   return {
